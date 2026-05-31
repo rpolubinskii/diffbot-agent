@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# diffbot-agent local runtime state
+config.toml
+*.sqlite3
+*.sqlite3-journal
+
+/.idea
