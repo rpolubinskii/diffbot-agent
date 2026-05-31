@@ -33,7 +33,7 @@ class AudioConfig:
 
 @dataclass(frozen=True)
 class SecretsConfig:
-    openai_api_key_env: str
+    openai_api_key: str
 
 
 @dataclass(frozen=True)
@@ -80,7 +80,7 @@ def load_config(path: Path) -> AppConfig:
             voice_stream_enabled=_boolean(audio, "voice_stream_enabled", False),
         ),
         secrets=SecretsConfig(
-            openai_api_key_env=_string(secrets, "openai_api_key_env", "OPENAI_API_KEY"),
+            openai_api_key=_optional_string(secrets, "openai_api_key", ""),
         ),
     )
 
@@ -96,6 +96,13 @@ def _string(data: dict[str, Any], key: str, default: str) -> str:
     value = data.get(key, default)
     if not isinstance(value, str) or not value.strip():
         raise ConfigError(f"{key} must be a non-empty string.")
+    return value
+
+
+def _optional_string(data: dict[str, Any], key: str, default: str) -> str:
+    value = data.get(key, default)
+    if not isinstance(value, str):
+        raise ConfigError(f"{key} must be a string.")
     return value
 
 

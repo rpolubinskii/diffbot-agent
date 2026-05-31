@@ -12,12 +12,15 @@ backend/profile, not a Codex CLI subprocess.
 ```bash
 uv sync
 cp config.example.toml config.toml
-export OPENAI_API_KEY=...
 ```
 
-Edit `config.toml` for local ports and model selection. Secrets stay out of
-TOML; `[secrets].openai_api_key_env` names the environment variable that holds
-the OpenAI API key.
+Edit ignored `config.toml` for local ports, model selection, and the OpenAI API
+key:
+
+```toml
+[secrets]
+openai_api_key = "sk-..."
+```
 
 ## Run
 

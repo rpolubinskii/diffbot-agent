@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -28,12 +27,14 @@ class OpenAICodexRuntime:
         self._session = None
 
     async def start(self) -> None:
-        api_key_env = self.config.secrets.openai_api_key_env
-        if not os.getenv(api_key_env):
-            raise ConfigError(f"Environment variable {api_key_env} is required for OpenAI.")
+        if not self.config.secrets.openai_api_key.strip():
+            raise ConfigError("[secrets].openai_api_key is required for OpenAI.")
 
         from agents import Agent, SQLiteSession
+        from agents import set_default_openai_key
         from agents.mcp import MCPServerStreamableHttp
+
+        set_default_openai_key(self.config.secrets.openai_api_key)
 
         stack = AsyncExitStack()
         try:
@@ -57,7 +58,7 @@ class OpenAICodexRuntime:
                 mcp_servers=[mcp_server],
                 mcp_config={
                     "convert_schemas_to_strict": True,
-                    "include_server_in_tool_names": False,
+                    "include_server_in_tool_names": True,
                 },
             )
             self._session = SQLiteSession(

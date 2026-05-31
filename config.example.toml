@@ -14,4 +14,4 @@ port = 50051
 voice_stream_enabled = false
 
 [secrets]
-openai_api_key_env = "OPENAI_API_KEY"
+openai_api_key = ""

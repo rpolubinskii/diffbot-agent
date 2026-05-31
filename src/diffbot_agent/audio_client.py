@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -25,8 +26,11 @@ async def stdin_commands(prompt: str = "diffbot> ") -> AsyncIterator[str]:
     while True:
         try:
             line = await asyncio.to_thread(input, prompt)
-        except EOFError:
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
             break
         command = line.strip()
+        if command.lower() in {"exit", "quit"}:
+            break
         if command:
             yield command
