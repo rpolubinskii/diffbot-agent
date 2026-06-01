@@ -1,10 +1,17 @@
 from __future__ import annotations
 
-import sys
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from typing import Any
 
 from diffbot_agent.config import AppConfig, ConfigError
+from diffbot_agent.logging_utils import (
+    elapsed_ms,
+    has_error_marker,
+    log_event,
+    monotonic_ms,
+    serialize_for_json,
+)
 
 
 INSTRUCTIONS = """You are DiffBot's long-running robot control agent.
@@ -26,12 +33,15 @@ class OpenAIAgentsRuntime:
         self._agent = None
         self._session = None
         self._run_config = None
+        self._run_hooks = None
 
     async def start(self) -> None:
         profile = self.config.agent
         if profile.backend == "openai" and not profile.openai_api_key.strip():
             raise ConfigError(f"[agents.{profile.name}].openai_api_key is required for OpenAI.")
-        if profile.backend == "ollama" and (not profile.model.strip() or not profile.base_url.strip()):
+        if profile.backend == "ollama" and (
+            not profile.model.strip() or not profile.base_url.strip()
+        ):
             raise ConfigError(f"[agents.{profile.name}] requires model and base_url for Ollama.")
 
         from agents import Agent, RunConfig, SQLiteSession
@@ -52,11 +62,13 @@ class OpenAIAgentsRuntime:
             )
         else:
             raise ConfigError(f'Unsupported agent backend "{profile.backend}".')
+        self._run_hooks = _build_run_hooks(self.config)
+        mcp_server_class = _logging_mcp_server_class(MCPServerStreamableHttp)
 
         stack = AsyncExitStack()
         try:
             mcp_server = await stack.enter_async_context(
-                MCPServerStreamableHttp(
+                mcp_server_class(
                     name="diffbot-mcp",
                     params={
                         "url": self.config.mcp.url,
@@ -97,21 +109,13 @@ class OpenAIAgentsRuntime:
         result = Runner.run_streamed(
             self._agent,
             turn_text,
+            hooks=self._run_hooks,
             run_config=self._run_config,
             session=self._session,
         )
-        streamed_text = False
 
-        async for event in result.stream_events():
-            if _print_output_delta(event):
-                streamed_text = True
-
-        final_output = getattr(result, "final_output", None)
-        if final_output and not streamed_text:
-            print(final_output)
-        elif streamed_text:
-            print()
-        sys.stdout.flush()
+        async for _event in result.stream_events():
+            pass
 
     async def stop(self) -> None:
         if self._stack is not None:
@@ -120,9 +124,134 @@ class OpenAIAgentsRuntime:
             self._agent = None
             self._session = None
             self._run_config = None
+            self._run_hooks = None
 
 
 OpenAICodexRuntime = OpenAIAgentsRuntime
+
+
+def _build_run_hooks(config: AppConfig) -> Any:
+    from agents.lifecycle import RunHooksBase
+
+    class LoggingRunHooks(RunHooksBase):
+        async def on_llm_start(
+            self,
+            context: Any,
+            agent: Any,
+            system_prompt: str | None,
+            input_items: list[Any],
+        ) -> None:
+            log_event(
+                "llm.request",
+                {
+                    "active_agent": config.active_agent,
+                    "backend": config.agent.backend,
+                    "model": config.agent.model,
+                    "agent": getattr(agent, "name", None),
+                    "system_prompt": system_prompt,
+                    "input_items": input_items,
+                },
+            )
+
+        async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
+            log_event(
+                "llm.response",
+                {
+                    "active_agent": config.active_agent,
+                    "backend": config.agent.backend,
+                    "model": config.agent.model,
+                    "agent": getattr(agent, "name", None),
+                    "response": serialize_for_json(response),
+                },
+            )
+
+    return LoggingRunHooks()
+
+
+def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
+    class LoggingMCPServerStreamableHttp(base_class):  # type: ignore[misc, valid-type]
+        async def list_tools(self, *args: Any, **kwargs: Any) -> Any:
+            started = monotonic_ms()
+            log_event(
+                "mcp.list_tools.request",
+                {"server": self.name},
+            )
+            try:
+                result = await super().list_tools(*args, **kwargs)
+                log_event(
+                    "mcp.list_tools.response",
+                    {
+                        "server": self.name,
+                        "duration_ms": elapsed_ms(started),
+                        "tools": serialize_for_json(result),
+                    },
+                )
+                return result
+            except Exception as exc:
+                log_event(
+                    "mcp.list_tools.error",
+                    {
+                        "server": self.name,
+                        "duration_ms": elapsed_ms(started),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+                raise
+
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ) -> Any:
+            started = monotonic_ms()
+            log_event(
+                "mcp.tool.request",
+                {
+                    "server": self.name,
+                    "tool": tool_name,
+                    "arguments": arguments,
+                    "meta": meta,
+                },
+            )
+            try:
+                result = await super().call_tool(tool_name, arguments, meta=meta)
+                serialized_result = serialize_for_json(result)
+                log_event(
+                    "mcp.tool.response",
+                    {
+                        "server": self.name,
+                        "tool": tool_name,
+                        "duration_ms": elapsed_ms(started),
+                        "result": serialized_result,
+                    },
+                )
+                if has_error_marker(serialized_result):
+                    log_event(
+                        "mcp.tool.result_error",
+                        {
+                            "server": self.name,
+                            "tool": tool_name,
+                            "duration_ms": elapsed_ms(started),
+                            "result": serialized_result,
+                        },
+                    )
+                return result
+            except Exception as exc:
+                log_event(
+                    "mcp.tool.error",
+                    {
+                        "server": self.name,
+                        "tool": tool_name,
+                        "duration_ms": elapsed_ms(started),
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    },
+                )
+                raise
+
+    return LoggingMCPServerStreamableHttp
 
 
 def _ensure_robot_status(user_text: str, robot_status: str) -> str:
@@ -130,18 +259,3 @@ def _ensure_robot_status(user_text: str, robot_status: str) -> str:
         return user_text
     return f"{user_text}\n\nFresh robot://status:\n{robot_status}"
 
-
-def _print_output_delta(event: object) -> bool:
-    if getattr(event, "type", None) != "raw_response_event":
-        return False
-
-    data = getattr(event, "data", None)
-    if getattr(data, "type", None) != "response.output_text.delta":
-        return False
-
-    delta = getattr(data, "delta", "")
-    if not delta:
-        return False
-
-    print(delta, end="", flush=True)
-    return True

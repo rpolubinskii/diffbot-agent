@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from diffbot_agent.agent_runtime import AgentRuntime
 from diffbot_agent.audio_client import AudioCommandClient, stdin_commands
 from diffbot_agent.config import AppConfig
+from diffbot_agent.logging_utils import log_event
 from diffbot_agent.mcp_client import DiffbotMcpClient, compose_command_turn
 
 
@@ -51,13 +52,19 @@ class Orchestrator:
         try:
             await self._run_command_turn(command)
         except Exception as exc:
+            log_event(
+                "command.turn.error",
+                {
+                    "command": command,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
             print(f"Command turn failed: {exc}", file=sys.stderr)
         finally:
             self._turn_running = False
 
     async def _run_command_turn(self, command: str) -> None:
         robot_status = await self.mcp_client.read_robot_status()
-        turn_text = await self.mcp_client.command_turn_prompt(command, robot_status)
-        if turn_text is None:
-            turn_text = compose_command_turn(command, robot_status)
+        turn_text = compose_command_turn(command, robot_status)
         await self.runtime.run_turn(turn_text, robot_status)

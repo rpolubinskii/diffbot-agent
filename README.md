@@ -65,6 +65,10 @@ diffbot> stop
 diffbot> describe what you can see
 ```
 
+Operational logs are written to stderr as one compact JSON payload per line.
+Assistant responses are not printed to stdout; LLM inputs/responses and MCP
+requests/responses are captured in logs, with likely secrets redacted by default.
+
 ## Runtime Boundary
 
 The internal runtime interface is:
@@ -86,7 +90,7 @@ For each command:
 
 1. Apply the configured `[agent_runtime]` busy policy. V1 supports `ignore`.
 2. Read `robot://status` from `diffbot-mcp`.
-3. Fetch `diffbot.command_turn` from `diffbot-mcp` when available.
+3. Compose the command-turn prompt locally in this service.
 4. Send one user turn into the existing OpenAI Agents SDK `SQLiteSession`.
 5. Stream the run to completion while the agent may call MCP tools.
 

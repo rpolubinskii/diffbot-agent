@@ -1,12 +1,19 @@
 from __future__ import annotations
 
-import inspect
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
+
+from diffbot_agent.logging_utils import (
+    elapsed_ms,
+    has_error_marker,
+    log_event,
+    monotonic_ms,
+    serialize_for_json,
+)
 
 
 class DiffbotMcpError(RuntimeError):
@@ -48,32 +55,44 @@ class DiffbotMcpClient:
 
     async def read_resource_text(self, uri: str) -> str:
         session = self._require_session()
-        result = await session.read_resource(uri)
-        text = _extract_text(result)
-        if not text:
-            raise DiffbotMcpError(f"MCP resource {uri} returned no text content.")
-        return text
-
-    async def command_turn_prompt(self, vocal_command: str, robot_status: str) -> str | None:
-        session = self._require_session()
-        get_prompt = getattr(session, "get_prompt", None)
-        if get_prompt is None:
-            return None
-
-        kwargs = {
-            "vocal_command": vocal_command,
-            "operator_text": "",
-            "robot_status": robot_status,
-        }
-
+        started = monotonic_ms()
+        log_event("mcp.resource.request", {"uri": uri})
         try:
-            result = get_prompt("diffbot.command_turn", arguments=kwargs)
-            if inspect.isawaitable(result):
-                result = await result
-        except Exception:
-            return None
-
-        return _extract_text(result) or None
+            result = await session.read_resource(uri)
+            raw_result = serialize_for_json(result)
+            if has_error_marker(raw_result):
+                log_event(
+                    "mcp.resource.result_error",
+                    {
+                        "uri": uri,
+                        "duration_ms": elapsed_ms(started),
+                        "raw_result": raw_result,
+                    },
+                )
+            text = _extract_text(result)
+            if not text:
+                raise DiffbotMcpError(f"MCP resource {uri} returned no text content.")
+            log_event(
+                "mcp.resource.response",
+                {
+                    "uri": uri,
+                    "duration_ms": elapsed_ms(started),
+                    "text": text,
+                    "raw_result": raw_result,
+                },
+            )
+            return text
+        except Exception as exc:
+            log_event(
+                "mcp.resource.error",
+                {
+                    "uri": uri,
+                    "duration_ms": elapsed_ms(started),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            raise
 
     def _require_session(self) -> ClientSession:
         if self._session is None:
