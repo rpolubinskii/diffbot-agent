@@ -223,3 +223,5 @@ config.toml
 *.sqlite3-journal
 
 /.idea
+*.sqlite3-shm
+*.sqlite3-wal
