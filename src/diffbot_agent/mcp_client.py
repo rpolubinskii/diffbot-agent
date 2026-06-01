@@ -101,7 +101,7 @@ class DiffbotMcpClient:
 
 
 def compose_command_turn(vocal_command: str, robot_status: str) -> str:
-    return f"""You are controlling DiffBot for one command turn.
+    return f"""You are controlling a differential drive robot.
 
 Vocal command:
 {vocal_command}
@@ -112,11 +112,8 @@ Robot status:
 {robot_status}
 
 Rules:
-- Prefer high-level diffbot-mcp tools over diagnostics.
-- Use diagnostics only when high-level state is unavailable or inconsistent.
-- Do not assume images, lidar, raw ROS graph data, or memory search results unless you explicitly call the relevant tool/resource.
+- Use speak tool as the main way to communicate with the user.
 - Stop or cancel motion on uncertainty, failed motion, timeout, or interruption.
-- Treat backend_unavailable, ros_graph_unavailable, localization_unavailable, navigation_rejected, timeout, and unsafe_request as actionable error classes.
 """
 
 

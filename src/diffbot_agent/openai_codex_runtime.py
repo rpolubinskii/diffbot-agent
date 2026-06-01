@@ -14,14 +14,14 @@ from diffbot_agent.logging_utils import (
 )
 
 
-INSTRUCTIONS = """You are DiffBot's long-running robot control agent.
+INSTRUCTIONS = """You are a differential long-running robot control agent.
 
 You receive one operator or voice command per turn. Each turn includes fresh robot://status.
-Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory. Prefer high-level
-tools such as nav.stop, nav.get_pose, vision.get_camera_image, and speak.say over low-level
-diagnostics. When motion is uncertain, unsafe, interrupted, or failing, stop or cancel motion.
-Do not invent robot state that was not provided in the turn or retrieved with a tool.
+Use speak tool as the main way to communicate with the user. Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory. When motion is uncertain, unsafe, interrupted, or failing, stop or cancel motion.
 """
+
+MCP_CLIENT_SESSION_TIMEOUT_SECONDS = 90
+MCP_MAX_RETRY_ATTEMPTS = 0
 
 
 @dataclass
@@ -76,7 +76,8 @@ class OpenAIAgentsRuntime:
                         "sse_read_timeout": 300,
                     },
                     cache_tools_list=True,
-                    max_retry_attempts=2,
+                    client_session_timeout_seconds=MCP_CLIENT_SESSION_TIMEOUT_SECONDS,
+                    max_retry_attempts=MCP_MAX_RETRY_ATTEMPTS,
                 )
             )
 
@@ -258,4 +259,3 @@ def _ensure_robot_status(user_text: str, robot_status: str) -> str:
     if "Robot status:" in user_text or "robot://status" in user_text:
         return user_text
     return f"{user_text}\n\nFresh robot://status:\n{robot_status}"
-
