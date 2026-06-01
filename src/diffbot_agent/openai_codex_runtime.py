@@ -18,23 +18,40 @@ Do not invent robot state that was not provided in the turn or retrieved with a 
 
 
 @dataclass
-class OpenAICodexRuntime:
+class OpenAIAgentsRuntime:
     config: AppConfig
 
     def __post_init__(self) -> None:
         self._stack: AsyncExitStack | None = None
         self._agent = None
         self._session = None
+        self._run_config = None
 
     async def start(self) -> None:
-        if not self.config.secrets.openai_api_key.strip():
-            raise ConfigError("[secrets].openai_api_key is required for OpenAI.")
+        profile = self.config.agent
+        if profile.backend == "openai" and not profile.openai_api_key.strip():
+            raise ConfigError(f"[agents.{profile.name}].openai_api_key is required for OpenAI.")
+        if profile.backend == "ollama" and (not profile.model.strip() or not profile.base_url.strip()):
+            raise ConfigError(f"[agents.{profile.name}] requires model and base_url for Ollama.")
 
-        from agents import Agent, SQLiteSession
+        from agents import Agent, RunConfig, SQLiteSession
+        from agents import OpenAIProvider
         from agents import set_default_openai_key
         from agents.mcp import MCPServerStreamableHttp
 
-        set_default_openai_key(self.config.secrets.openai_api_key)
+        if profile.backend == "openai":
+            set_default_openai_key(profile.openai_api_key)
+            self._run_config = None
+        elif profile.backend == "ollama":
+            self._run_config = RunConfig(
+                model_provider=OpenAIProvider(
+                    api_key=profile.api_key or "ollama",
+                    base_url=profile.base_url,
+                    use_responses=False,
+                )
+            )
+        else:
+            raise ConfigError(f'Unsupported agent backend "{profile.backend}".')
 
         stack = AsyncExitStack()
         try:
@@ -54,7 +71,7 @@ class OpenAICodexRuntime:
             self._agent = Agent(
                 name="DiffBot",
                 instructions=INSTRUCTIONS,
-                model=self.config.agent.model,
+                model=profile.model,
                 mcp_servers=[mcp_server],
                 mcp_config={
                     "convert_schemas_to_strict": True,
@@ -62,8 +79,8 @@ class OpenAICodexRuntime:
                 },
             )
             self._session = SQLiteSession(
-                self.config.agent.session_id,
-                self.config.agent.session_db,
+                profile.session_id,
+                profile.session_db,
             )
             self._stack = stack
         except Exception:
@@ -72,12 +89,17 @@ class OpenAICodexRuntime:
 
     async def run_turn(self, user_text: str, robot_status: str) -> None:
         if self._agent is None or self._session is None:
-            raise RuntimeError("OpenAI runtime has not been started.")
+            raise RuntimeError("OpenAI Agents runtime has not been started.")
 
         from agents import Runner
 
         turn_text = _ensure_robot_status(user_text, robot_status)
-        result = Runner.run_streamed(self._agent, turn_text, session=self._session)
+        result = Runner.run_streamed(
+            self._agent,
+            turn_text,
+            run_config=self._run_config,
+            session=self._session,
+        )
         streamed_text = False
 
         async for event in result.stream_events():
@@ -97,6 +119,10 @@ class OpenAICodexRuntime:
             self._stack = None
             self._agent = None
             self._session = None
+            self._run_config = None
+
+
+OpenAICodexRuntime = OpenAIAgentsRuntime
 
 
 def _ensure_robot_status(user_text: str, robot_status: str) -> str:

@@ -43,7 +43,7 @@ class Orchestrator:
 
     async def _accept_command(self, command: str) -> None:
         if self._turn_running:
-            if self.config.agent.busy_policy == "ignore":
+            if self.config.agent_runtime.busy_policy == "ignore":
                 print(f"Ignoring command while agent turn is running: {command}", file=sys.stderr)
                 return
 

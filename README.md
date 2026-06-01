@@ -4,8 +4,8 @@ Long-running Python orchestrator for DiffBot command turns.
 
 V1 owns one OpenAI Agents SDK session, reads fresh `robot://status` from
 `diffbot-mcp`, and sends each manual or voice command as a new turn into the
-same session. The active runtime is `codex`, meaning an OpenAI Agents SDK
-backend/profile, not a Codex CLI subprocess.
+same session. The selected named agent profile can use OpenAI directly or
+Ollama's OpenAI-compatible `/v1` API.
 
 ## Setup
 
@@ -14,13 +14,34 @@ uv sync
 cp config.example.toml config.toml
 ```
 
-Edit ignored `config.toml` for local ports, model selection, and the OpenAI API
-key:
+Edit ignored `config.toml` for local ports, model selection, and the active
+agent profile. For OpenAI, set the key inside the selected profile:
 
 ```toml
-[secrets]
+[agents.openai-main]
+backend = "openai"
+model = "gpt-5.1"
+session_id = "diffbot-main"
+session_db = "diffbot-agent.sqlite3"
 openai_api_key = "sk-..."
 ```
+
+For local Ollama, point the profile at Ollama's OpenAI-compatible endpoint and
+make it active:
+
+```toml
+active_agent = "local-ollama"
+
+[agents.local-ollama]
+backend = "ollama"
+model = "qwen3"
+base_url = "http://localhost:11434/v1"
+session_id = "diffbot-ollama"
+session_db = "diffbot-agent.sqlite3"
+api_key = "ollama"
+```
+
+Ollama tool-calling quality depends on the selected local model.
 
 ## Run
 
@@ -55,15 +76,15 @@ class AgentRuntime:
     async def stop(self) -> None: ...
 ```
 
-`OpenAICodexRuntime` is the only implementation in V1. Future backends such as
-Claude, direct OpenAI API, local models, or CLI-backed runtimes should plug in
-behind this boundary.
+`OpenAIAgentsRuntime` is the V1 implementation. It keeps the same Agents SDK,
+MCP tool, streaming, and SQLite session flow for both OpenAI and Ollama
+profiles.
 
 ## Command Flow
 
 For each command:
 
-1. Apply the configured busy policy. V1 supports `ignore`.
+1. Apply the configured `[agent_runtime]` busy policy. V1 supports `ignore`.
 2. Read `robot://status` from `diffbot-mcp`.
 3. Fetch `diffbot.command_turn` from `diffbot-mcp` when available.
 4. Send one user turn into the existing OpenAI Agents SDK `SQLiteSession`.

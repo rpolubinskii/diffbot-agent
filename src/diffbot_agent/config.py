@@ -11,11 +11,19 @@ class ConfigError(ValueError):
 
 
 @dataclass(frozen=True)
-class AgentConfig:
+class AgentProfileConfig:
+    name: str
     backend: str
     model: str
     session_id: str
     session_db: str
+    openai_api_key: str = ""
+    base_url: str = ""
+    api_key: str = ""
+
+
+@dataclass(frozen=True)
+class AgentRuntimeConfig:
     busy_policy: str
 
 
@@ -32,16 +40,13 @@ class AudioConfig:
 
 
 @dataclass(frozen=True)
-class SecretsConfig:
-    openai_api_key: str
-
-
-@dataclass(frozen=True)
 class AppConfig:
-    agent: AgentConfig
+    active_agent: str
+    agent: AgentProfileConfig
+    agents: dict[str, AgentProfileConfig]
+    agent_runtime: AgentRuntimeConfig
     mcp: McpConfig
     audio: AudioConfig
-    secrets: SecretsConfig
 
 
 def load_config(path: Path) -> AppConfig:
@@ -53,36 +58,124 @@ def load_config(path: Path) -> AppConfig:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"Invalid TOML in {path}: {exc}") from exc
 
-    agent = _table(data, "agent")
     mcp = _table(data, "mcp")
     audio = _table(data, "audio")
-    secrets = _table(data, "secrets")
-
-    agent_config = AgentConfig(
-        backend=_string(agent, "backend", "codex"),
-        model=_string(agent, "model", "gpt-5.1"),
-        session_id=_string(agent, "session_id", "diffbot-main"),
-        session_db=_string(agent, "session_db", "diffbot-agent.sqlite3"),
-        busy_policy=_string(agent, "busy_policy", "ignore"),
-    )
-
-    if agent_config.backend != "codex":
-        raise ConfigError("V1 only supports [agent].backend = \"codex\".")
-    if agent_config.busy_policy != "ignore":
-        raise ConfigError("V1 only supports [agent].busy_policy = \"ignore\".")
+    active_agent, agents, runtime_config = _load_agent_config(data)
 
     return AppConfig(
-        agent=agent_config,
+        active_agent=active_agent,
+        agent=agents[active_agent],
+        agents=agents,
+        agent_runtime=runtime_config,
         mcp=McpConfig(url=_string(mcp, "url", "http://localhost:8080/mcp")),
         audio=AudioConfig(
             host=_string(audio, "host", "localhost"),
             port=_integer(audio, "port", 50051),
             voice_stream_enabled=_boolean(audio, "voice_stream_enabled", False),
         ),
-        secrets=SecretsConfig(
-            openai_api_key=_optional_string(secrets, "openai_api_key", ""),
-        ),
     )
+
+
+def _load_agent_config(
+    data: dict[str, Any],
+) -> tuple[str, dict[str, AgentProfileConfig], AgentRuntimeConfig]:
+    if "agents" in data or "active_agent" in data:
+        active_agent = _string(data, "active_agent", "")
+        agents_table = _table(data, "agents")
+        if not agents_table:
+            raise ConfigError("[agents] must contain at least one agent profile.")
+
+        agents = {
+            name: _profile_from_table(name, _profile_table(value, name))
+            for name, value in agents_table.items()
+        }
+        if active_agent not in agents:
+            raise ConfigError(f'active_agent "{active_agent}" is not configured under [agents].')
+
+        _validate_selected_profile(agents[active_agent])
+        return active_agent, agents, _runtime_config(_table(data, "agent_runtime"))
+
+    return _legacy_agent_config(data)
+
+
+def _legacy_agent_config(
+    data: dict[str, Any],
+) -> tuple[str, dict[str, AgentProfileConfig], AgentRuntimeConfig]:
+    agent = _table(data, "agent")
+    secrets = _table(data, "secrets")
+    backend = _string(agent, "backend", "codex")
+    if backend == "codex":
+        backend = "openai"
+
+    profile = AgentProfileConfig(
+        name="legacy-agent",
+        backend=backend,
+        model=_string(agent, "model", "gpt-5.1"),
+        session_id=_string(agent, "session_id", "diffbot-main"),
+        session_db=_string(agent, "session_db", "diffbot-agent.sqlite3"),
+        openai_api_key=_optional_string(secrets, "openai_api_key", ""),
+    )
+    _validate_selected_profile(profile)
+
+    runtime_config = AgentRuntimeConfig(
+        busy_policy=_string(agent, "busy_policy", "ignore"),
+    )
+    _validate_runtime_config(runtime_config)
+    return profile.name, {profile.name: profile}, runtime_config
+
+
+def _profile_from_table(name: str, data: dict[str, Any]) -> AgentProfileConfig:
+    backend = _string(data, "backend", "")
+    if backend not in {"openai", "ollama"}:
+        raise ConfigError(f'[agents.{name}].backend must be "openai" or "ollama".')
+
+    return AgentProfileConfig(
+        name=name,
+        backend=backend,
+        model=_optional_string(data, "model", ""),
+        session_id=_string(data, "session_id", "diffbot-main"),
+        session_db=_string(data, "session_db", "diffbot-agent.sqlite3"),
+        openai_api_key=_optional_string(data, "openai_api_key", ""),
+        base_url=_optional_string(data, "base_url", ""),
+        api_key=_optional_string(data, "api_key", "ollama"),
+    )
+
+
+def _profile_table(value: Any, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ConfigError(f"[agents.{name}] must be a TOML table.")
+    return value
+
+
+def _runtime_config(data: dict[str, Any]) -> AgentRuntimeConfig:
+    config = AgentRuntimeConfig(
+        busy_policy=_string(data, "busy_policy", "ignore"),
+    )
+    _validate_runtime_config(config)
+    return config
+
+
+def _validate_runtime_config(config: AgentRuntimeConfig) -> None:
+    if config.busy_policy != "ignore":
+        raise ConfigError('V1 only supports busy_policy = "ignore".')
+
+
+def _validate_selected_profile(profile: AgentProfileConfig) -> None:
+    if profile.backend == "openai":
+        if not profile.model.strip():
+            raise ConfigError(f"[agents.{profile.name}].model is required for OpenAI.")
+        if not profile.openai_api_key.strip():
+            raise ConfigError(f"[agents.{profile.name}].openai_api_key is required for OpenAI.")
+        return
+
+    if profile.backend == "ollama":
+        if not profile.model.strip():
+            raise ConfigError(f"[agents.{profile.name}].model is required for Ollama.")
+        if not profile.base_url.strip():
+            raise ConfigError(f"[agents.{profile.name}].base_url is required for Ollama.")
+        return
+
+    raise ConfigError(f'[agents.{profile.name}].backend must be "openai" or "ollama".')
 
 
 def _table(data: dict[str, Any], key: str) -> dict[str, Any]:

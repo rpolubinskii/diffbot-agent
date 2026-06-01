@@ -5,11 +5,18 @@ import asyncio
 import sys
 from pathlib import Path
 
+from diffbot_agent.agent_runtime import AgentRuntime
 from diffbot_agent.audio_client import AudioCommandClient
-from diffbot_agent.config import ConfigError, load_config
+from diffbot_agent.config import AppConfig, ConfigError, load_config
 from diffbot_agent.mcp_client import DiffbotMcpClient
-from diffbot_agent.openai_codex_runtime import OpenAICodexRuntime
+from diffbot_agent.openai_codex_runtime import OpenAIAgentsRuntime
 from diffbot_agent.orchestrator import Orchestrator
+
+
+def build_runtime(config: AppConfig) -> AgentRuntime:
+    if config.agent.backend in {"openai", "ollama"}:
+        return OpenAIAgentsRuntime(config)
+    raise ConfigError(f'Unsupported agent backend "{config.agent.backend}".')
 
 
 def main() -> None:
@@ -24,7 +31,7 @@ def main() -> None:
 
     try:
         config = load_config(args.config)
-        runtime = OpenAICodexRuntime(config)
+        runtime = build_runtime(config)
         mcp_client = DiffbotMcpClient(config.mcp.url)
         audio_client = AudioCommandClient(config.audio)
         orchestrator = Orchestrator(config, runtime, mcp_client, audio_client)

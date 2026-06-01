@@ -1,9 +1,21 @@
-[agent]
-backend = "codex"
+active_agent = "openai-main"
+
+[agent_runtime]
+busy_policy = "ignore"
+
+[agents.openai-main]
+backend = "openai"
 model = "gpt-5.1"
 session_id = "diffbot-main"
 session_db = "diffbot-agent.sqlite3"
-busy_policy = "ignore"
+
+[agents.local-ollama]
+backend = "ollama"
+model = ""
+base_url = ""
+session_id = "diffbot-ollama"
+session_db = "diffbot-agent.sqlite3"
+api_key = "ollama"
 
 [mcp]
 url = "http://localhost:8080/mcp"
@@ -12,6 +24,3 @@ url = "http://localhost:8080/mcp"
 host = "localhost"
 port = 50051
 voice_stream_enabled = false
-
-[secrets]
-openai_api_key = ""
