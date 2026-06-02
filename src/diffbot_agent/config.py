@@ -37,6 +37,7 @@ class AudioConfig:
     host: str
     port: int
     voice_stream_enabled: bool
+    reconnect_delay_seconds: float
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,9 @@ def load_config(path: Path) -> AppConfig:
         mcp=McpConfig(url=_string(mcp, "url", "http://localhost:8080/mcp")),
         audio=AudioConfig(
             host=_string(audio, "host", "localhost"),
-            port=_integer(audio, "port", 50051),
+            port=_integer(audio, "port", 50052),
             voice_stream_enabled=_boolean(audio, "voice_stream_enabled", False),
+            reconnect_delay_seconds=_number(audio, "reconnect_delay_seconds", 2.0),
         ),
     )
 
@@ -204,6 +206,15 @@ def _integer(data: dict[str, Any], key: str, default: int) -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise ConfigError(f"{key} must be an integer.")
     return value
+
+
+def _number(data: dict[str, Any], key: str, default: float) -> float:
+    value = data.get(key, default)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise ConfigError(f"{key} must be a number.")
+    if value < 0:
+        raise ConfigError(f"{key} must be greater than or equal to zero.")
+    return float(value)
 
 
 def _boolean(data: dict[str, Any], key: str, default: bool) -> bool:

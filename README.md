@@ -51,14 +51,19 @@ Start `diffbot-mcp` first, then run:
 uv run diffbot-agent --config config.toml
 ```
 
-Until diffbot-audio exposes a VTT command stream, keep:
+To receive finalized VTT commands directly from `diffbot-audio`, enable the
+voice command stream:
 
 ```toml
 [audio]
-voice_stream_enabled = false
+host = "localhost"
+port = 50052
+voice_stream_enabled = true
+reconnect_delay_seconds = 2.0
 ```
 
-The agent then accepts manual commands on stdin:
+For manual development without audio, set `voice_stream_enabled = false`. The
+agent then accepts commands on stdin:
 
 ```text
 diffbot> stop

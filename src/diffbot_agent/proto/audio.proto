@@ -1,0 +1,34 @@
+syntax = "proto3";
+
+package diffbot.audio.v1;
+
+option java_multiple_files = true;
+option java_package = "com.diffbot.audio.v1";
+
+service AudioService {
+  rpc Speak(SpeakRequest) returns (stream SpeakEvent);
+  rpc StreamVoiceCommands(StreamVoiceCommandsRequest) returns (stream VoiceCommandEvent);
+}
+
+message SpeakRequest {
+  string text = 1;
+}
+
+message SpeakEvent {
+  SpeakState state = 1;
+  string error = 2;
+}
+
+message StreamVoiceCommandsRequest {}
+
+message VoiceCommandEvent {
+  string text = 1;
+  string error = 2;
+}
+
+enum SpeakState {
+  SPEAK_STATE_UNSPECIFIED = 0;
+  STARTED = 1;
+  FINISHED = 2;
+  FAILED = 3;
+}

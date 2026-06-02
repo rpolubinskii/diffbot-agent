@@ -22,5 +22,6 @@ url = "http://localhost:8080/mcp"
 
 [audio]
 host = "localhost"
-port = 50051
-voice_stream_enabled = false
+port = 50052
+voice_stream_enabled = true
+reconnect_delay_seconds = 2.0
