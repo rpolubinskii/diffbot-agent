@@ -45,7 +45,6 @@ class OpenAIAgentsRuntime:
             raise ConfigError(f"[agents.{profile.name}] requires model and base_url for Ollama.")
 
         from agents import Agent, RunConfig, SQLiteSession
-        from agents import OpenAIProvider
         from agents import set_default_openai_key
         from agents.mcp import MCPServerStreamableHttp
 
@@ -53,8 +52,10 @@ class OpenAIAgentsRuntime:
             set_default_openai_key(profile.openai_api_key)
             self._run_config = None
         elif profile.backend == "ollama":
+            from diffbot_agent.ollama_vision_provider import OllamaVisionProvider
+
             self._run_config = RunConfig(
-                model_provider=OpenAIProvider(
+                model_provider=OllamaVisionProvider(
                     api_key=profile.api_key or "ollama",
                     base_url=profile.base_url,
                     use_responses=False,

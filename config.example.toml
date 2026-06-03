@@ -5,12 +5,14 @@ busy_policy = "ignore"
 
 [agents.openai-main]
 backend = "openai"
+# Use a vision-capable OpenAI model for camera image analysis.
 model = "gpt-5.1"
 session_id = "diffbot-main"
 session_db = "diffbot-agent.sqlite3"
 
 [agents.local-ollama]
 backend = "ollama"
+# Use a vision-capable local model for camera image analysis.
 model = ""
 base_url = ""
 session_id = "diffbot-ollama"

@@ -41,7 +41,13 @@ session_db = "diffbot-agent.sqlite3"
 api_key = "ollama"
 ```
 
-Ollama tool-calling quality depends on the selected local model.
+Ollama tool-calling and visual analysis quality depend on the selected local
+model. To inspect camera images returned by `vision.get_camera_image`, use a
+vision-capable Ollama model.
+
+`vision.get_camera_image` returns image content from `diffbot-mcp`. OpenAI and
+Ollama multimodal models can inspect that image directly. Text-only models may
+call the tool but cannot reason about the returned image.
 
 ## Run
 
