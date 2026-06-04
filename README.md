@@ -26,6 +26,18 @@ session_db = "diffbot-agent.sqlite3"
 openai_api_key = "sk-..."
 ```
 
+Runtime behavior is configured under `[agent_runtime]`:
+
+```toml
+[agent_runtime]
+busy_policy = "ignore"
+max_turns = 50
+```
+
+`busy_policy = "ignore"` drops new voice or stdin commands while another command
+turn is still running. `max_turns` controls the OpenAI Agents SDK turn-loop cap
+for a single command.
+
 For local Ollama, point the profile at Ollama's OpenAI-compatible endpoint and
 make it active:
 
@@ -102,7 +114,8 @@ For each command:
 1. Apply the configured `[agent_runtime]` busy policy. V1 supports `ignore`.
 2. Read `robot://status` from `diffbot-mcp`.
 3. Compose the command-turn prompt locally in this service.
-4. Send one user turn into the existing OpenAI Agents SDK `SQLiteSession`.
+4. Send one user turn into the existing OpenAI Agents SDK `SQLiteSession`, with
+   the run capped by `[agent_runtime].max_turns`.
 5. Stream the run to completion while the agent may call MCP tools.
 
 The orchestrator does not start a new agent process or session per command.

@@ -112,6 +112,7 @@ class OpenAIAgentsRuntime:
             self._agent,
             turn_text,
             hooks=self._run_hooks,
+            max_turns=self.config.agent_runtime.max_turns,
             run_config=self._run_config,
             session=self._session,
         )

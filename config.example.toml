@@ -2,6 +2,7 @@ active_agent = "openai-main"
 
 [agent_runtime]
 busy_policy = "ignore"
+max_turns = 100
 
 [agents.openai-main]
 backend = "openai"
