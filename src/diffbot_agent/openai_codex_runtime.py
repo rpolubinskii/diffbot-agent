@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import inspect
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
+from diffbot_agent.command_memory import (
+    CommandContextState,
+    CommandMemoryStore,
+    build_canonical_record,
+    compose_command_input,
+    sanitize_session_items,
+    utc_now,
+)
 from diffbot_agent.config import AppConfig, ConfigError
 from diffbot_agent.logging_utils import (
     elapsed_ms,
@@ -17,7 +26,7 @@ from diffbot_agent.logging_utils import (
 INSTRUCTIONS = """You are a differential long-running robot control agent.
 
 You receive one operator or voice command per turn. Each turn includes fresh robot://status.
-Use speak tool as the main way to communicate with the user. Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory. When motion is uncertain, unsafe, interrupted, or failing, stop or cancel motion.
+Use speak tool as the main way to communicate with the user. Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory.
 """
 
 MCP_CLIENT_SESSION_TIMEOUT_SECONDS = 90
@@ -32,8 +41,8 @@ class OpenAIAgentsRuntime:
         self._stack: AsyncExitStack | None = None
         self._agent = None
         self._session = None
-        self._run_config = None
-        self._run_hooks = None
+        self._model_provider = None
+        self._command_memories: CommandMemoryStore | None = None
 
     async def start(self) -> None:
         profile = self.config.agent
@@ -44,26 +53,23 @@ class OpenAIAgentsRuntime:
         ):
             raise ConfigError(f"[agents.{profile.name}] requires model and base_url for Ollama.")
 
-        from agents import Agent, RunConfig, SQLiteSession
+        from agents import Agent, SQLiteSession
         from agents import set_default_openai_key
         from agents.mcp import MCPServerStreamableHttp
 
         if profile.backend == "openai":
             set_default_openai_key(profile.openai_api_key)
-            self._run_config = None
+            self._model_provider = None
         elif profile.backend == "ollama":
             from diffbot_agent.ollama_vision_provider import OllamaVisionProvider
 
-            self._run_config = RunConfig(
-                model_provider=OllamaVisionProvider(
-                    api_key=profile.api_key or "ollama",
-                    base_url=profile.base_url,
-                    use_responses=False,
-                )
+            self._model_provider = OllamaVisionProvider(
+                api_key=profile.api_key or "ollama",
+                base_url=profile.base_url,
+                use_responses=False,
             )
         else:
             raise ConfigError(f'Unsupported agent backend "{profile.backend}".')
-        self._run_hooks = _build_run_hooks(self.config)
         mcp_server_class = _logging_mcp_server_class(MCPServerStreamableHttp)
 
         stack = AsyncExitStack()
@@ -92,48 +98,129 @@ class OpenAIAgentsRuntime:
                     "include_server_in_tool_names": True,
                 },
             )
-            self._session = SQLiteSession(
+            session_class = _image_sanitizing_session_class(SQLiteSession)
+            self._session = session_class(
                 profile.session_id,
                 profile.session_db,
             )
+            self._command_memories = CommandMemoryStore(profile.session_db)
             self._stack = stack
         except Exception:
+            if self._command_memories is not None:
+                await self._command_memories.close()
+                self._command_memories = None
+            if self._session is not None:
+                close = getattr(self._session, "close", None)
+                if callable(close):
+                    result = close()
+                    if inspect.isawaitable(result):
+                        await result
+                self._session = None
             await stack.aclose()
             raise
 
-    async def run_turn(self, user_text: str, robot_status: str) -> None:
-        if self._agent is None or self._session is None:
+    async def run_turn(self, command: str, robot_status: str) -> None:
+        if (
+            self._agent is None
+            or self._session is None
+            or self._command_memories is None
+        ):
             raise RuntimeError("OpenAI Agents runtime has not been started.")
 
-        from agents import Runner
+        from agents import RunConfig, Runner
 
-        turn_text = _ensure_robot_status(user_text, robot_status)
+        recent_memories = await self._command_memories.latest(
+            self.config.agent.session_id,
+            self.config.agent_runtime.history_commands,
+        )
+        turn_text = compose_command_input(command, robot_status, recent_memories)
+        command_state = CommandContextState(
+            full_tool_rounds=self.config.agent_runtime.full_tool_rounds,
+        )
+        run_config_kwargs: dict[str, Any] = {
+            "session_input_callback": _exclude_session_history,
+            "call_model_input_filter": command_state.filter_model_input,
+            "trace_include_sensitive_data": False,
+        }
+        if self._model_provider is not None:
+            run_config_kwargs["model_provider"] = self._model_provider
+        run_config = RunConfig(**run_config_kwargs)
+        run_hooks = _build_run_hooks(self.config, command_state)
+        started_at = utc_now()
         result = Runner.run_streamed(
             self._agent,
             turn_text,
-            hooks=self._run_hooks,
+            hooks=run_hooks,
             max_turns=self.config.agent_runtime.max_turns,
-            run_config=self._run_config,
+            run_config=run_config,
             session=self._session,
         )
+        try:
+            async for _event in result.stream_events():
+                pass
+        except Exception as exc:
+            completed_at = utc_now()
+            record = build_canonical_record(
+                session_id=self.config.agent.session_id,
+                started_at=started_at,
+                completed_at=completed_at,
+                command=command,
+                completion_status=_completion_status(exc),
+                items=_result_input_items(result),
+                final_output=getattr(result, "final_output", None),
+                error=exc,
+            )
+            try:
+                await self._command_memories.add(record)
+            except Exception as memory_exc:
+                log_event(
+                    "command.memory.error",
+                    {
+                        "command": command,
+                        "error_type": type(memory_exc).__name__,
+                        "error": str(memory_exc),
+                    },
+                )
+            raise
 
-        async for _event in result.stream_events():
-            pass
+        completed_at = utc_now()
+        await self._command_memories.add(
+            build_canonical_record(
+                session_id=self.config.agent.session_id,
+                started_at=started_at,
+                completed_at=completed_at,
+                command=command,
+                completion_status="completed",
+                items=_result_input_items(result),
+                final_output=getattr(result, "final_output", None),
+            )
+        )
 
     async def stop(self) -> None:
+        if self._session is not None:
+            close = getattr(self._session, "close", None)
+            if callable(close):
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+            self._session = None
+        if self._command_memories is not None:
+            await self._command_memories.close()
+            self._command_memories = None
         if self._stack is not None:
             await self._stack.aclose()
             self._stack = None
             self._agent = None
-            self._session = None
-            self._run_config = None
-            self._run_hooks = None
+            self._model_provider = None
 
 
 OpenAICodexRuntime = OpenAIAgentsRuntime
 
 
-def _build_run_hooks(config: AppConfig) -> Any:
+def _build_run_hooks(
+    config: AppConfig,
+    command_state: CommandContextState,
+) -> Any:
     from agents.lifecycle import RunHooksBase
 
     class LoggingRunHooks(RunHooksBase):
@@ -157,6 +244,7 @@ def _build_run_hooks(config: AppConfig) -> Any:
             )
 
         async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
+            command_state.mark_model_request_succeeded()
             log_event(
                 "llm.response",
                 {
@@ -169,6 +257,38 @@ def _build_run_hooks(config: AppConfig) -> Any:
             )
 
     return LoggingRunHooks()
+
+
+def _image_sanitizing_session_class(base_class: type[Any]) -> type[Any]:
+    class ImageSanitizingSQLiteSession(base_class):  # type: ignore[misc, valid-type]
+        async def add_items(self, items: list[Any]) -> None:
+            await super().add_items(sanitize_session_items(items))
+
+    return ImageSanitizingSQLiteSession
+
+
+def _exclude_session_history(
+    history_items: list[Any],
+    new_items: list[Any],
+) -> list[Any]:
+    del history_items
+    return new_items
+
+
+def _result_input_items(result: Any) -> list[Any]:
+    to_input_list = getattr(result, "to_input_list", None)
+    if not callable(to_input_list):
+        return []
+    try:
+        return list(to_input_list())
+    except Exception:
+        return []
+
+
+def _completion_status(error: BaseException) -> str:
+    if type(error).__name__ == "MaxTurnsExceeded":
+        return "max_turns"
+    return "failed"
 
 
 def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
@@ -255,9 +375,3 @@ def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
                 raise
 
     return LoggingMCPServerStreamableHttp
-
-
-def _ensure_robot_status(user_text: str, robot_status: str) -> str:
-    if "Robot status:" in user_text or "robot://status" in user_text:
-        return user_text
-    return f"{user_text}\n\nFresh robot://status:\n{robot_status}"

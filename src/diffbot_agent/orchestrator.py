@@ -8,7 +8,7 @@ from diffbot_agent.agent_runtime import AgentRuntime
 from diffbot_agent.audio_client import AudioCommandClient, stdin_commands
 from diffbot_agent.config import AppConfig
 from diffbot_agent.logging_utils import log_event
-from diffbot_agent.mcp_client import DiffbotMcpClient, compose_command_turn
+from diffbot_agent.mcp_client import DiffbotMcpClient
 
 
 @dataclass
@@ -66,5 +66,4 @@ class Orchestrator:
 
     async def _run_command_turn(self, command: str) -> None:
         robot_status = await self.mcp_client.read_robot_status()
-        turn_text = compose_command_turn(command, robot_status)
-        await self.runtime.run_turn(turn_text, robot_status)
+        await self.runtime.run_turn(command, robot_status)

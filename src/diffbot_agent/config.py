@@ -26,6 +26,8 @@ class AgentProfileConfig:
 class AgentRuntimeConfig:
     busy_policy: str
     max_turns: int
+    history_commands: int = 4
+    full_tool_rounds: int = 6
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,8 @@ def _legacy_agent_config(
     runtime_config = AgentRuntimeConfig(
         busy_policy=_string(agent, "busy_policy", "ignore"),
         max_turns=_positive_integer(agent, "max_turns", 50),
+        history_commands=_non_negative_integer(agent, "history_commands", 4),
+        full_tool_rounds=_non_negative_integer(agent, "full_tool_rounds", 6),
     )
     _validate_runtime_config(runtime_config)
     return profile.name, {profile.name: profile}, runtime_config
@@ -155,6 +159,8 @@ def _runtime_config(data: dict[str, Any]) -> AgentRuntimeConfig:
     config = AgentRuntimeConfig(
         busy_policy=_string(data, "busy_policy", "ignore"),
         max_turns=_positive_integer(data, "max_turns", 50),
+        history_commands=_non_negative_integer(data, "history_commands", 4),
+        full_tool_rounds=_non_negative_integer(data, "full_tool_rounds", 6),
     )
     _validate_runtime_config(config)
     return config
@@ -215,6 +221,13 @@ def _positive_integer(data: dict[str, Any], key: str, default: int) -> int:
     value = _integer(data, key, default)
     if value <= 0:
         raise ConfigError(f"{key} must be greater than zero.")
+    return value
+
+
+def _non_negative_integer(data: dict[str, Any], key: str, default: int) -> int:
+    value = _integer(data, key, default)
+    if value < 0:
+        raise ConfigError(f"{key} must be greater than or equal to zero.")
     return value
 
 

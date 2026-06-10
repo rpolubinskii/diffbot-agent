@@ -21,7 +21,13 @@ _SECRET_KEY_PATTERN = re.compile(
 )
 _OPENAI_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _BEARER_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+\b", re.IGNORECASE)
+_IMAGE_DATA_URL_PATTERN = re.compile(
+    r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+",
+    re.IGNORECASE,
+)
 _MASK = "[redacted]"
+_IMAGE_MASK = "[camera image redacted]"
+_IMAGE_TYPES = {"image", "input_image", "computer_screenshot"}
 
 
 def configure_logging() -> None:
@@ -70,11 +76,16 @@ def elapsed_ms(start_ms: float) -> int:
 
 def redact(value: Any) -> Any:
     if isinstance(value, Mapping):
+        value_type = str(value.get("type", "")).lower()
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
             if _SECRET_KEY_PATTERN.search(key_text):
                 redacted[key_text] = _MASK
+            elif key_text in {"image_url", "file_data"}:
+                redacted[key_text] = _IMAGE_MASK
+            elif value_type in _IMAGE_TYPES and key_text == "data":
+                redacted[key_text] = _IMAGE_MASK
             else:
                 redacted[key_text] = redact(item)
         return redacted
@@ -84,7 +95,8 @@ def redact(value: Any) -> Any:
     if isinstance(value, tuple):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        return _BEARER_PATTERN.sub("Bearer [redacted]", _OPENAI_KEY_PATTERN.sub(_MASK, value))
+        redacted = _IMAGE_DATA_URL_PATTERN.sub(_IMAGE_MASK, value)
+        return _BEARER_PATTERN.sub("Bearer [redacted]", _OPENAI_KEY_PATTERN.sub(_MASK, redacted))
     return value
 
 

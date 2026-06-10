@@ -8,6 +8,7 @@ from pathlib import Path
 
 from diffbot_agent.agent_runtime import AgentRuntime
 from diffbot_agent.audio_client import AudioCommandClient
+from diffbot_agent.command_memory import clear_command_memories
 from diffbot_agent.config import AppConfig, ConfigError, load_config
 from diffbot_agent.logging_utils import configure_logging
 from diffbot_agent.mcp_client import DiffbotMcpClient
@@ -35,6 +36,10 @@ async def reset_session(config: AppConfig) -> None:
             result = close()
             if inspect.isawaitable(result):
                 await result
+        clear_command_memories(
+            config.agent.session_db,
+            config.agent.session_id,
+        )
 
 
 def main() -> None:
@@ -44,13 +49,13 @@ def main() -> None:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path("../../config.toml"),
+        default=Path("config.toml"),
         help="Path to config.toml.",
     )
     parser.add_argument(
         "--reset-session",
         action="store_true",
-        help="Clear the active agent profile's persisted SQLite session and exit.",
+        help="Clear SDK history and canonical command memory for the active profile.",
     )
     args = parser.parse_args()
 

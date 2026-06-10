@@ -32,11 +32,17 @@ Runtime behavior is configured under `[agent_runtime]`:
 [agent_runtime]
 busy_policy = "ignore"
 max_turns = 50
+history_commands = 4
+full_tool_rounds = 6
 ```
 
 `busy_policy = "ignore"` drops new voice or stdin commands while another command
-turn is still running. `max_turns` controls the OpenAI Agents SDK turn-loop cap
-for a single command.
+turn is still running. `max_turns` counts model invocations within one command.
+`history_commands` controls how many completed canonical command records are
+included as recent memory; set it to `0` to disable recent command memory.
+`full_tool_rounds` controls how many of the current command's latest model/tool
+rounds remain exact; older rounds are compacted deterministically. Set it to `0`
+to compact every completed tool round after the model has used it once.
 
 For local Ollama, point the profile at Ollama's OpenAI-compatible endpoint and
 make it active:
@@ -90,7 +96,8 @@ diffbot> describe what you can see
 
 Operational logs are written to stderr as one compact JSON payload per line.
 Assistant responses are not printed to stdout; LLM inputs/responses and MCP
-requests/responses are captured in logs, with likely secrets redacted by default.
+requests/responses are captured in logs, with likely secrets and image payloads
+redacted by default. Sensitive SDK trace payloads are disabled.
 
 ## Runtime Boundary
 
@@ -99,7 +106,7 @@ The internal runtime interface is:
 ```python
 class AgentRuntime:
     async def start(self) -> None: ...
-    async def run_turn(self, user_text: str, robot_status: str) -> None: ...
+    async def run_turn(self, command: str, robot_status: str) -> None: ...
     async def stop(self) -> None: ...
 ```
 
@@ -113,9 +120,22 @@ For each command:
 
 1. Apply the configured `[agent_runtime]` busy policy. V1 supports `ignore`.
 2. Read `robot://status` from `diffbot-mcp`.
-3. Compose the command-turn prompt locally in this service.
-4. Send one user turn into the existing OpenAI Agents SDK `SQLiteSession`, with
-   the run capped by `[agent_runtime].max_turns`.
-5. Stream the run to completion while the agent may call MCP tools.
+3. Load the latest canonical command-memory records and compose the command
+   prompt inside the runtime. Fresh `robot://status` is authoritative.
+4. Send one user turn through the OpenAI Agents SDK, with the run capped by
+   `[agent_runtime].max_turns`. Persisted raw SDK history is excluded from model
+   input across operator commands.
+5. Before every model request, keep the configured number of latest tool rounds
+   exact, compact older rounds, and replace already-consumed camera images.
+6. Stream the run to completion while the agent may call MCP tools.
+7. Store one canonical command record for completed, failed, or max-turn runs.
 
-The orchestrator does not start a new agent process or session per command.
+Raw SDK rows remain available in the same SQLite file for debugging, but image
+data is removed before those rows are persisted. Canonical records are stored in
+the `command_memories` table and contain the original command, completion
+status, assistant and spoken text, compact tool outcomes, and deterministic
+searchable text. Reasoning, status snapshots, acknowledgements, telemetry, and
+image data are excluded.
+
+`--reset-session` clears both SDK history and canonical command records for the
+active profile. The orchestrator does not start a new agent process per command.
