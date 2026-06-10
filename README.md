@@ -121,14 +121,17 @@ For each command:
 1. Apply the configured `[agent_runtime]` busy policy. V1 supports `ignore`.
 2. Read `robot://status` from `diffbot-mcp`.
 3. Load the latest canonical command-memory records and compose the command
-   prompt inside the runtime. Fresh `robot://status` is authoritative.
+   prompt inside the runtime.
 4. Send one user turn through the OpenAI Agents SDK, with the run capped by
    `[agent_runtime].max_turns`. Persisted raw SDK history is excluded from model
    input across operator commands.
-5. Before every model request, keep the configured number of latest tool rounds
+5. Include the composed command prompt in the first model request and any
+   retries until that request succeeds. Later model requests in the command
+   omit that initial user item while retaining model/tool rounds.
+6. Before every model request, keep the configured number of latest tool rounds
    exact, compact older rounds, and replace already-consumed camera images.
-6. Stream the run to completion while the agent may call MCP tools.
-7. Store one canonical command record for completed, failed, or max-turn runs.
+7. Stream the run to completion while the agent may call MCP tools.
+8. Store one canonical command record for completed, failed, or max-turn runs.
 
 Raw SDK rows remain available in the same SQLite file for debugging, but image
 data is removed before those rows are persisted. Canonical records are stored in

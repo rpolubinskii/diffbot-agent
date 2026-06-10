@@ -68,6 +68,7 @@ def utc_now() -> str:
 @dataclass
 class CommandContextState:
     full_tool_rounds: int
+    initial_prompt_consumed: bool = False
     consumed_image_call_ids: set[str] = field(default_factory=set)
     image_call_ids: set[str] = field(default_factory=set)
     pending_image_call_ids: set[str] = field(default_factory=set)
@@ -79,6 +80,8 @@ class CommandContextState:
             payload.model_data.input,
             self.full_tool_rounds,
         )
+        if self.initial_prompt_consumed:
+            compacted = _remove_initial_user_item(compacted)
         filtered, visible_image_ids = replace_consumed_images(
             compacted,
             self.consumed_image_call_ids,
@@ -91,6 +94,7 @@ class CommandContextState:
         )
 
     def mark_model_request_succeeded(self) -> None:
+        self.initial_prompt_consumed = True
         self.consumed_image_call_ids.update(self.pending_image_call_ids)
         self.pending_image_call_ids.clear()
 
@@ -252,21 +256,15 @@ def compose_command_input(
     recent_memories: list[CanonicalCommandRecord],
 ) -> str:
     memory_text = render_recent_memories(recent_memories)
-    return f"""You are controlling a differential drive robot.
-
+    return f"""
 Recent canonical command memory (status snapshots and images are omitted):
 {memory_text}
 
-Current operator command:
+Voice Command:
 {command}
 
-Fresh robot://status (authoritative for current pose and state):
+Robot status:
 {robot_status}
-
-Rules:
-- Use the fresh robot://status above instead of remembered pose or telemetry.
-- Use speak tool as the main way to communicate with the user.
-- Stop or cancel motion on uncertainty, failed motion, timeout, or interruption.
 """
 
 
@@ -655,6 +653,13 @@ def _initial_input_end(items: list[Any]) -> int:
             continue
         break
     return index
+
+
+def _remove_initial_user_item(items: list[Any]) -> list[Any]:
+    for index, item in enumerate(items[:_initial_input_end(items)]):
+        if isinstance(item, dict) and item.get("role") == "user":
+            return [*items[:index], *items[index + 1 :]]
+    return items
 
 
 def _item_type(item: Any) -> str:

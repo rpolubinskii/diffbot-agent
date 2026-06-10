@@ -100,23 +100,6 @@ class DiffbotMcpClient:
         return self._session
 
 
-def compose_command_turn(vocal_command: str, robot_status: str) -> str:
-    return f"""You are controlling a differential drive robot.
-
-Vocal command:
-{vocal_command}
-
-Operator text:
-
-Robot status:
-{robot_status}
-
-Rules:
-- Use speak tool as the main way to communicate with the user.
-- Stop or cancel motion on uncertainty, failed motion, timeout, or interruption.
-"""
-
-
 def _extract_text(value: Any) -> str:
     parts: list[str] = []
     _collect_text(value, parts)

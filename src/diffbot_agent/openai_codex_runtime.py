@@ -25,7 +25,6 @@ from diffbot_agent.logging_utils import (
 
 INSTRUCTIONS = """You are a differential long-running robot control agent.
 
-You receive one operator or voice command per turn. Each turn includes fresh robot://status.
 Use speak tool as the main way to communicate with the user. Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory.
 """
 
