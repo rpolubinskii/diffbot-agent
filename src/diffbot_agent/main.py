@@ -43,8 +43,6 @@ async def reset_session(config: AppConfig) -> None:
 
 
 def main() -> None:
-    configure_logging()
-
     parser = argparse.ArgumentParser(description="Run the DiffBot agent orchestrator.")
     parser.add_argument(
         "--config",
@@ -61,6 +59,7 @@ def main() -> None:
 
     try:
         config = load_config(args.config)
+        configure_logging(config.logging.level)
         if args.reset_session:
             asyncio.run(reset_session(config))
             print(

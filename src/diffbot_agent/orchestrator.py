@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -59,6 +60,7 @@ class Orchestrator:
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                 },
+                level=logging.ERROR,
             )
             print(f"Command turn failed: {exc}", file=sys.stderr)
         finally:

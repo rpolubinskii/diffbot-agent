@@ -95,9 +95,11 @@ diffbot> describe what you can see
 ```
 
 Operational logs are written to stderr as one compact JSON payload per line.
-Assistant responses are not printed to stdout; LLM inputs/responses and MCP
-requests/responses are captured in logs, with likely secrets and image payloads
-redacted by default. Sensitive SDK trace payloads are disabled.
+Configure `[logging] level = "info"` (the default) to print called tool names,
+available model reasoning, warnings, and errors. Use `level = "debug"` to retain
+the detailed LLM, MCP, resource, audio, and timing events. Likely secrets and
+image payloads are redacted in both modes. Assistant responses are not printed
+to stdout, and sensitive SDK trace payloads are disabled.
 
 ## Runtime Boundary
 

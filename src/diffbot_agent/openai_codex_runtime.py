@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,7 @@ from diffbot_agent.logging_utils import (
     elapsed_ms,
     has_error_marker,
     log_event,
+    log_by_verbosity,
     monotonic_ms,
     serialize_for_json,
 )
@@ -179,6 +181,7 @@ class OpenAIAgentsRuntime:
                         "error_type": type(memory_exc).__name__,
                         "error": str(memory_exc),
                     },
+                    level=logging.ERROR,
                 )
             raise
 
@@ -244,18 +247,51 @@ def _build_run_hooks(
 
         async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
             command_state.mark_model_request_succeeded()
-            log_event(
-                "llm.response",
-                {
+            reasoning = _reasoning_texts(response)
+            log_by_verbosity(
+                debug_event="llm.response",
+                debug_payload={
                     "active_agent": config.active_agent,
                     "backend": config.agent.backend,
                     "model": config.agent.model,
                     "agent": getattr(agent, "name", None),
                     "response": serialize_for_json(response),
                 },
+                info_event="llm.reasoning" if reasoning else None,
+                info_payload={"text": reasoning},
             )
 
     return LoggingRunHooks()
+
+
+def _reasoning_texts(response: Any) -> list[str]:
+    serialized = serialize_for_json(response)
+    if not isinstance(serialized, dict):
+        return []
+
+    output = serialized.get("output")
+    if not isinstance(output, list):
+        return []
+
+    texts: list[str] = []
+    seen: set[str] = set()
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "reasoning":
+            continue
+        for key in ("summary", "content"):
+            parts = item.get(key)
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if isinstance(text, str):
+                    text = text.strip()
+                    if text and text not in seen:
+                        seen.add(text)
+                        texts.append(text)
+    return texts
 
 
 def _image_sanitizing_session_class(base_class: type[Any]) -> type[Any]:
@@ -318,6 +354,7 @@ def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     },
+                    level=logging.ERROR,
                 )
                 raise
 
@@ -328,14 +365,16 @@ def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
             meta: dict[str, Any] | None = None,
         ) -> Any:
             started = monotonic_ms()
-            log_event(
-                "mcp.tool.request",
-                {
+            log_by_verbosity(
+                debug_event="mcp.tool.request",
+                debug_payload={
                     "server": self.name,
                     "tool": tool_name,
                     "arguments": arguments,
                     "meta": meta,
                 },
+                info_event="mcp.tool.call",
+                info_payload={"tool": tool_name},
             )
             try:
                 result = await super().call_tool(tool_name, arguments, meta=meta)
@@ -358,6 +397,7 @@ def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
                             "duration_ms": elapsed_ms(started),
                             "result": serialized_result,
                         },
+                        level=logging.WARNING,
                     )
                 return result
             except Exception as exc:
@@ -370,6 +410,7 @@ def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
                         "error_type": type(exc).__name__,
                         "error": str(exc),
                     },
+                    level=logging.ERROR,
                 )
                 raise
 

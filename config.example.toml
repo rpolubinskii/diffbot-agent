@@ -1,5 +1,8 @@
 active_agent = "openai-main"
 
+[logging]
+level = "info"
+
 [agent_runtime]
 busy_policy = "ignore"
 max_turns = 1000

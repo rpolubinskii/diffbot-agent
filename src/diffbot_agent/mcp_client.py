@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
@@ -68,6 +69,7 @@ class DiffbotMcpClient:
                         "duration_ms": elapsed_ms(started),
                         "raw_result": raw_result,
                     },
+                    level=logging.WARNING,
                 )
             text = _extract_text(result)
             if not text:
@@ -91,6 +93,7 @@ class DiffbotMcpClient:
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                 },
+                level=logging.ERROR,
             )
             raise
 

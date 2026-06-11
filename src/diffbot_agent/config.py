@@ -44,6 +44,11 @@ class AudioConfig:
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    level: str
+
+
+@dataclass(frozen=True)
 class AppConfig:
     active_agent: str
     agent: AgentProfileConfig
@@ -51,6 +56,7 @@ class AppConfig:
     agent_runtime: AgentRuntimeConfig
     mcp: McpConfig
     audio: AudioConfig
+    logging: LoggingConfig
 
 
 def load_config(path: Path) -> AppConfig:
@@ -64,6 +70,7 @@ def load_config(path: Path) -> AppConfig:
 
     mcp = _table(data, "mcp")
     audio = _table(data, "audio")
+    logging_config = _table(data, "logging")
     active_agent, agents, runtime_config = _load_agent_config(data)
 
     return AppConfig(
@@ -78,6 +85,7 @@ def load_config(path: Path) -> AppConfig:
             voice_stream_enabled=_boolean(audio, "voice_stream_enabled", False),
             reconnect_delay_seconds=_number(audio, "reconnect_delay_seconds", 2.0),
         ),
+        logging=LoggingConfig(level=_logging_level(logging_config)),
     )
 
 
@@ -245,3 +253,10 @@ def _boolean(data: dict[str, Any], key: str, default: bool) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{key} must be true or false.")
     return value
+
+
+def _logging_level(data: dict[str, Any]) -> str:
+    level = _string(data, "level", "info").lower()
+    if level not in {"info", "debug"}:
+        raise ConfigError('logging level must be "info" or "debug".')
+    return level

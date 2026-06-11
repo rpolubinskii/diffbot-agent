@@ -30,15 +30,15 @@ _IMAGE_MASK = "[camera image redacted]"
 _IMAGE_TYPES = {"image", "input_image", "computer_screenshot"}
 
 
-def configure_logging() -> None:
+def configure_logging(level: str) -> None:
     logger = logging.getLogger(LOGGER_NAME)
-    if logger.handlers:
-        return
-
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG if level == "debug" else logging.INFO)
     logger.propagate = False
 
 
@@ -46,7 +46,7 @@ def log_event(
     event: str,
     payload: Mapping[str, Any] | None = None,
     *,
-    level: int = logging.INFO,
+    level: int = logging.DEBUG,
 ) -> None:
     logger = logging.getLogger(LOGGER_NAME)
     if not logger.isEnabledFor(level):
@@ -64,6 +64,20 @@ def log_event(
             sort_keys=True,
         ),
     )
+
+
+def log_by_verbosity(
+    *,
+    debug_event: str,
+    debug_payload: Mapping[str, Any] | None = None,
+    info_event: str | None = None,
+    info_payload: Mapping[str, Any] | None = None,
+) -> None:
+    logger = logging.getLogger(LOGGER_NAME)
+    if logger.isEnabledFor(logging.DEBUG):
+        log_event(debug_event, debug_payload, level=logging.DEBUG)
+    elif info_event is not None:
+        log_event(info_event, info_payload, level=logging.INFO)
 
 
 def monotonic_ms() -> float:
