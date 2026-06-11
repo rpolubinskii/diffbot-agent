@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
@@ -134,9 +135,21 @@ class OpenAIAgentsRuntime:
             self.config.agent.session_id,
             self.config.agent_runtime.history_commands,
         )
-        turn_text = compose_command_input(command, robot_status, recent_memories)
+        started_at = utc_now()
+        started_monotonic = time.monotonic()
+        turn_text = compose_command_input(
+            command,
+            robot_status,
+            recent_memories,
+            started_at=started_at,
+        )
         command_state = CommandContextState(
             full_tool_rounds=self.config.agent_runtime.full_tool_rounds,
+            command=command,
+            robot_status=robot_status,
+            recent_memories=tuple(recent_memories),
+            started_at=started_at,
+            started_monotonic=started_monotonic,
         )
         run_config_kwargs: dict[str, Any] = {
             "session_input_callback": _exclude_session_history,
@@ -147,7 +160,6 @@ class OpenAIAgentsRuntime:
             run_config_kwargs["model_provider"] = self._model_provider
         run_config = RunConfig(**run_config_kwargs)
         run_hooks = _build_run_hooks(self.config, command_state)
-        started_at = utc_now()
         result = Runner.run_streamed(
             self._agent,
             turn_text,

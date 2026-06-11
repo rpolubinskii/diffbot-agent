@@ -5,10 +5,11 @@ import json
 import re
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from diffbot_agent.logging_utils import has_error_marker, serialize_for_json
 
@@ -16,6 +17,10 @@ from diffbot_agent.logging_utils import has_error_marker, serialize_for_json
 IMAGE_PLACEHOLDER = "[camera image consumed]"
 UNKNOWN_OUTPUT_PREVIEW_CHARS = 500
 COMPACT_TEXT_PREVIEW_CHARS = 800
+STALE_VISUAL_WARNING = (
+    "Old visual observations are search hints only and cannot establish current "
+    "visibility. Reverify them with a current camera image."
+)
 
 _IMAGE_DATA_URL_PATTERN = re.compile(
     r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+",
@@ -49,6 +54,14 @@ _NAVIGATION_MARKERS = (
 )
 _SAFETY_MARKERS = ("stop", "cancel", "safety", "emergency", "estop")
 _STATUS_MARKERS = ("status", "robot_state", "get_pose", "telemetry")
+_VISUAL_MARKERS = ("camera", "image", "photo", "snapshot", "vision")
+_GENERIC_CAPTURE_MARKERS = (
+    "camera image captured",
+    "image captured",
+    "photo captured",
+    "snapshot captured",
+    "capture successful",
+)
 _IDENTIFIER_KEYS = {
     "id",
     "call_id",
@@ -65,38 +78,136 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@dataclass(frozen=True)
+class EventTimestamp:
+    elapsed_seconds: float
+    observed_at: datetime
+
+    def current_prefix(self) -> str:
+        return (
+            f"[+{self.elapsed_seconds:.1f}s | "
+            f"{self.observed_at.astimezone(timezone.utc):%H:%M:%SZ}]"
+        )
+
+
 @dataclass
 class CommandContextState:
     full_tool_rounds: int
-    initial_prompt_consumed: bool = False
-    consumed_image_call_ids: set[str] = field(default_factory=set)
+    command: str = ""
+    robot_status: str = ""
+    recent_memories: tuple[CanonicalCommandRecord, ...] = ()
+    started_at: str = field(default_factory=utc_now)
+    started_monotonic: float = field(default_factory=time.monotonic)
+    monotonic_clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+    utc_clock: Callable[[], datetime] = field(
+        default=lambda: datetime.now(timezone.utc),
+        repr=False,
+    )
+    event_timestamps: dict[str, EventTimestamp] = field(default_factory=dict)
+    completed_call_ids: set[str] = field(default_factory=set)
     image_call_ids: set[str] = field(default_factory=set)
-    pending_image_call_ids: set[str] = field(default_factory=set)
+    latest_image_call_id: str | None = None
+    latest_image_items: tuple[dict[str, Any], dict[str, Any]] | None = None
+    latest_image_valid: bool = False
+
+    def __post_init__(self) -> None:
+        self._started_datetime = _parse_timestamp(self.started_at)
+        self._historical_memory = render_recent_memories(
+            list(self.recent_memories),
+            now=self._started_datetime,
+        )
 
     def filter_model_input(self, payload: Any) -> Any:
         from agents.run_config import ModelInputData
 
+        current_items = payload.model_data.input
+        self._update_visual_state(current_items)
         compacted = compact_current_command(
-            payload.model_data.input,
+            current_items,
             self.full_tool_rounds,
         )
-        if self.initial_prompt_consumed:
-            compacted = _remove_initial_user_item(compacted)
-        filtered, visible_image_ids = replace_consumed_images(
+        compacted = self._restore_current_image(compacted)
+        filtered, visible_image_ids = retain_current_image(
             compacted,
-            self.consumed_image_call_ids,
+            self.latest_image_call_id if self.latest_image_valid else None,
         )
         self.image_call_ids.update(visible_image_ids)
-        self.pending_image_call_ids = visible_image_ids - self.consumed_image_call_ids
+        filtered = _replace_initial_user_item(
+            filtered,
+            _render_current_context(
+                self.command,
+                self.robot_status,
+                self._started_datetime,
+            ),
+        )
+        filtered = self._annotate_current_events(filtered)
+        filtered.append(_historical_memory_item(self._historical_memory))
         return ModelInputData(
             input=filtered,
             instructions=payload.model_data.instructions,
         )
 
     def mark_model_request_succeeded(self) -> None:
-        self.initial_prompt_consumed = True
-        self.consumed_image_call_ids.update(self.pending_image_call_ids)
-        self.pending_image_call_ids.clear()
+        pass
+
+    def _update_visual_state(self, items: list[Any]) -> None:
+        calls, outputs = _matched_tool_items(items)
+        for call, output in calls:
+            call_id = _call_id(call)
+            if not call_id or call_id in self.completed_call_ids or output is None:
+                continue
+            self.completed_call_ids.add(call_id)
+            tool_name = _normalize_tool_name(
+                str(call.get("name") or call.get("type") or "")
+            )
+            output_value = output.get("output")
+            if contains_image(output_value):
+                self.latest_image_call_id = call_id
+                self.latest_image_items = (copy.deepcopy(call), copy.deepcopy(output))
+                self.latest_image_valid = True
+            elif _is_environment_changing_tool(tool_name):
+                self.latest_image_valid = False
+
+    def _restore_current_image(self, items: list[Any]) -> list[Any]:
+        if not self.latest_image_valid or self.latest_image_items is None:
+            return items
+        if any(
+            _item_type(item) in _OUTPUT_TYPES
+            and _call_id(item) == self.latest_image_call_id
+            for item in items
+        ):
+            return items
+        call, output = self.latest_image_items
+        return [*items, copy.deepcopy(call), copy.deepcopy(output)]
+
+    def _annotate_current_events(self, items: list[Any]) -> list[Any]:
+        annotated = copy.deepcopy(items)
+        initial_end = _initial_input_end(annotated)
+        for index, item in enumerate(annotated):
+            if index < initial_end or not isinstance(item, dict):
+                continue
+            item_type = _item_type(item)
+            if item_type in _OUTPUT_TYPES:
+                call_id = _call_id(item)
+                if call_id:
+                    prefix = self._event_timestamp(f"tool:{call_id}").current_prefix()
+                    item["output"] = _annotate_tool_output(item.get("output"), prefix)
+            elif _is_assistant_message(item):
+                key = f"message:{_stable_item_key(item)}"
+                prefix = self._event_timestamp(key).current_prefix()
+                _prefix_message_text(item, prefix)
+        return annotated
+
+    def _event_timestamp(self, key: str) -> EventTimestamp:
+        existing = self.event_timestamps.get(key)
+        if existing is not None:
+            return existing
+        timestamp = EventTimestamp(
+            elapsed_seconds=max(0.0, self.monotonic_clock() - self.started_monotonic),
+            observed_at=_as_utc(self.utc_clock()),
+        )
+        self.event_timestamps[key] = timestamp
+        return timestamp
 
 
 @dataclass(frozen=True)
@@ -254,38 +365,62 @@ def compose_command_input(
     command: str,
     robot_status: str,
     recent_memories: list[CanonicalCommandRecord],
+    *,
+    started_at: str | None = None,
 ) -> str:
-    memory_text = render_recent_memories(recent_memories)
-    return f"""
-Recent canonical command memory (status snapshots and images are omitted):
-{memory_text}
-
-Voice Command:
-{command}
-
-Robot status:
-{robot_status}
-"""
+    command_time = _parse_timestamp(started_at or utc_now())
+    return (
+        _render_current_context(command, robot_status, command_time)
+        + "\n"
+        + _render_historical_memory_section(
+            render_recent_memories(recent_memories, now=command_time)
+        )
+    )
 
 
-def render_recent_memories(records: list[CanonicalCommandRecord]) -> str:
+def render_recent_memories(
+    records: list[CanonicalCommandRecord],
+    *,
+    now: datetime | None = None,
+) -> str:
     if not records:
         return "(none)"
 
+    rendered_at = _as_utc(now or datetime.now(timezone.utc))
     rendered: list[str] = []
+    stale_hints: list[str] = []
+    seen_text: set[str] = set()
     for record in records:
+        observed_at = _parse_timestamp(record.completed_at)
+        prefix = _historical_prefix(observed_at, rendered_at)
+        current_outcomes: list[str] = []
+        for text in _canonical_record_texts(record):
+            normalized = _normalize_text(text)
+            if not normalized or normalized in seen_text:
+                continue
+            seen_text.add(normalized)
+            if _is_scene_dependent_conclusion(text):
+                stale_hints.append(f"{prefix} Observation: {text}")
+            else:
+                current_outcomes.append(text)
+
         item = {
-            "completed_at": record.completed_at,
             "command": record.command,
             "completion_status": record.completion_status,
-            "final_assistant_text": record.final_assistant_text,
-            "spoken_text": list(record.spoken_text),
-            "tool_events": list(record.tool_events),
-            "navigation_outcomes": list(record.navigation_outcomes),
-            "safety_outcomes": list(record.safety_outcomes),
-            "error_outcomes": list(record.error_outcomes),
+            "outcomes": current_outcomes,
+            "tool_events": _canonical_events(record),
         }
-        rendered.append(_json_dump(item))
+        rendered.append(f"{prefix} {_json_dump(item)}")
+
+    if stale_hints:
+        rendered.extend(
+            [
+                "",
+                "STALE_HINTS_REQUIRING_REVERIFICATION",
+                STALE_VISUAL_WARNING,
+                *stale_hints,
+            ]
+        )
     return "\n".join(rendered)
 
 
@@ -314,10 +449,11 @@ def build_canonical_record(
         )
         if event is None:
             continue
-        events.append(event)
         spoken_text = event.get("spoken_text")
         if isinstance(spoken_text, str) and spoken_text:
             spoken.append(spoken_text)
+        if event.get("category") != "speech":
+            events.append(event)
 
     navigation = tuple(
         event for event in events if event.get("category") == "navigation"
@@ -336,6 +472,7 @@ def build_canonical_record(
         )
 
     final_text = _final_assistant_text(serialized_items, final_output)
+    spoken = _deduplicate_texts(spoken, excluded=(final_text,))
     searchable_payload = {
         "command": command,
         "completion_status": completion_status,
@@ -383,10 +520,29 @@ def compact_current_command(items: list[Any], full_tool_rounds: int) -> list[Any
     return result
 
 
+def retain_current_image(
+    items: list[Any],
+    current_image_call_id: str | None,
+) -> tuple[list[Any], set[str]]:
+    result = copy.deepcopy(items)
+    image_call_ids: set[str] = set()
+    for item in result:
+        if not isinstance(item, dict) or item.get("type") not in _OUTPUT_TYPES:
+            continue
+        call_id = _call_id(item)
+        if not call_id or not contains_image(item.get("output")):
+            continue
+        image_call_ids.add(call_id)
+        if call_id != current_image_call_id:
+            item["output"] = sanitize_images(item.get("output"))
+    return result, image_call_ids
+
+
 def replace_consumed_images(
     items: list[Any],
     consumed_call_ids: set[str],
 ) -> tuple[list[Any], set[str]]:
+    """Apply the previous one-shot image policy for compatibility."""
     result = copy.deepcopy(items)
     image_call_ids: set[str] = set()
     for item in result:
@@ -458,6 +614,12 @@ def compact_tool_event(
     arguments = _parse_json_value(call.get("arguments"))
     output_value = _tool_output_value(output)
     parsed_output = _parse_output(output_value)
+    if contains_image(output_value):
+        parsed_output = _remove_image_placeholders(parsed_output)
+        if parsed_output in (None, "", {}, []):
+            return None
+    if _is_generic_capture_result(normalized_name, parsed_output):
+        return None
     if _is_status_snapshot(parsed_output):
         return None
     status, error_details = _tool_status(parsed_output)
@@ -662,6 +824,20 @@ def _remove_initial_user_item(items: list[Any]) -> list[Any]:
     return items
 
 
+def _replace_initial_user_item(items: list[Any], text: str) -> list[Any]:
+    result = copy.deepcopy(items)
+    for index, item in enumerate(result[:_initial_input_end(result)]):
+        if isinstance(item, dict) and item.get("role") == "user":
+            replacement = copy.deepcopy(item)
+            replacement["content"] = text
+            result[index] = replacement
+            return result
+    return [
+        {"role": "user", "type": "message", "content": text},
+        *result,
+    ]
+
+
 def _item_type(item: Any) -> str:
     if isinstance(item, dict):
         return str(item.get("type", ""))
@@ -690,6 +866,17 @@ def _tool_category(tool_name: str) -> str:
     if any(marker in tool_name for marker in _NAVIGATION_MARKERS):
         return "navigation"
     return "tool"
+
+
+def _is_environment_changing_tool(tool_name: str) -> bool:
+    return _tool_category(tool_name) in {"navigation", "safety"}
+
+
+def _is_generic_capture_result(tool_name: str, value: Any) -> bool:
+    if not any(marker in tool_name for marker in _VISUAL_MARKERS):
+        return False
+    serialized = _json_dump(value).lower()
+    return any(marker in serialized for marker in _GENERIC_CAPTURE_MARKERS)
 
 
 def _is_status_tool(tool_name: str) -> bool:
@@ -859,6 +1046,205 @@ def _bounded_text(value: str, limit: int) -> str:
     if len(value) <= limit:
         return value
     return value[:limit] + "..."
+
+
+def _render_current_context(
+    command: str,
+    robot_status: str,
+    started_at: datetime,
+) -> str:
+    prefix = EventTimestamp(0.0, started_at).current_prefix()
+    return (
+        f"CURRENT_COMMAND\n{prefix} {command}\n\n"
+        f"CURRENT_ROBOT_STATUS\n{prefix} {robot_status}\n\n"
+        "CURRENT_COMMAND_TIMELINE"
+    )
+
+
+def _render_historical_memory_section(memory_text: str) -> str:
+    return (
+        "HISTORICAL_MEMORY\n"
+        "Status snapshots and raw images are omitted.\n"
+        f"{memory_text}"
+    )
+
+
+def _historical_memory_item(memory_text: str) -> dict[str, Any]:
+    return {
+        "role": "developer",
+        "type": "message",
+        "content": _render_historical_memory_section(memory_text),
+    }
+
+
+def _annotate_tool_output(value: Any, prefix: str) -> Any:
+    if isinstance(value, str):
+        return f"{prefix} {value}"
+    if isinstance(value, list):
+        return [{"type": "input_text", "text": prefix}, *copy.deepcopy(value)]
+    if value is None:
+        return prefix
+    return f"{prefix} {_json_dump(value)}"
+
+
+def _prefix_message_text(item: dict[str, Any], prefix: str) -> None:
+    content = item.get("content")
+    if isinstance(content, str):
+        item["content"] = f"{prefix} {content}"
+        return
+    if not isinstance(content, list):
+        return
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") not in {"output_text", "input_text", "text"}:
+            continue
+        text = part.get("text")
+        if isinstance(text, str):
+            part["text"] = f"{prefix} {text}"
+            return
+
+
+def _stable_item_key(item: dict[str, Any]) -> str:
+    return _json_dump(item)
+
+
+def _canonical_record_texts(record: CanonicalCommandRecord) -> list[str]:
+    texts = [record.final_assistant_text, *record.spoken_text]
+    for event in record.tool_events:
+        for key in ("spoken_text", "output_preview"):
+            value = event.get(key)
+            if isinstance(value, str):
+                texts.append(value)
+    return _deduplicate_texts(texts)
+
+
+def _canonical_events(record: CanonicalCommandRecord) -> list[dict[str, Any]]:
+    events = [
+        *record.tool_events,
+        *record.navigation_outcomes,
+        *record.safety_outcomes,
+        *record.error_outcomes,
+    ]
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for event in events:
+        if event.get("category") == "speech":
+            continue
+        cleaned = _remove_image_placeholders(event)
+        if not isinstance(cleaned, dict):
+            continue
+        cleaned.pop("spoken_text", None)
+        cleaned.pop("output_preview", None)
+        if not cleaned:
+            continue
+        key = _json_dump(cleaned)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return result
+
+
+def _deduplicate_texts(
+    texts: list[str],
+    *,
+    excluded: tuple[str, ...] = (),
+) -> list[str]:
+    seen = {_normalize_text(text) for text in excluded if text}
+    result: list[str] = []
+    for text in texts:
+        stripped = text.strip()
+        normalized = _normalize_text(stripped)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(stripped)
+    return result
+
+
+def _normalize_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def _is_scene_dependent_conclusion(text: str) -> bool:
+    normalized = f" {_normalize_text(text)} "
+    visual_terms = (
+        " i see ",
+        " visible ",
+        " appears ",
+        " located ",
+        " location ",
+        " to the left ",
+        " to the right ",
+        " in front ",
+        " behind ",
+        " next to ",
+        " near ",
+        " beside ",
+        " by the ",
+        " under ",
+        " above ",
+        " inside ",
+        " outside ",
+        " on the ",
+        " is in ",
+        " is at ",
+        " is on ",
+        " was in ",
+        " was at ",
+        " was on ",
+    )
+    return any(term in normalized for term in visual_terms)
+
+
+def _remove_image_placeholders(value: Any) -> Any:
+    if isinstance(value, str):
+        return value.replace(IMAGE_PLACEHOLDER, "").strip()
+    if isinstance(value, list):
+        cleaned = [_remove_image_placeholders(item) for item in value]
+        return [item for item in cleaned if item not in (None, "", {}, [])]
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            cleaned_item = _remove_image_placeholders(item)
+            if cleaned_item not in (None, "", {}, []):
+                cleaned[key] = cleaned_item
+        if cleaned.get("type") in {"input_text", "output_text", "text"} and not any(
+            key in cleaned for key in ("text", "content")
+        ):
+            return {}
+        return cleaned
+    return value
+
+
+def _historical_prefix(observed_at: datetime, now: datetime) -> str:
+    age_seconds = max(0, int((now - observed_at).total_seconds()))
+    return f"[{observed_at:%H:%M:%SZ} | age {_compact_age(age_seconds)}]"
+
+
+def _compact_age(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _parse_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.now(timezone.utc)
+    return _as_utc(parsed)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _json_dump(value: Any) -> str:
