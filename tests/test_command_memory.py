@@ -5,14 +5,9 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-from diffbot_agent.command_memory import (
-    IMAGE_PLACEHOLDER,
-    CommandContextState,
-    build_canonical_record,
-    compose_command_input,
-    contains_image,
-    render_recent_memories,
-)
+from diffbot_agent.context_window import CommandContextState, compose_command_input
+from diffbot_agent.episode import build_canonical_record, render_recent_memories
+from diffbot_agent.sanitize import IMAGE_PLACEHOLDER, contains_image
 
 
 class MutableClock:
@@ -176,7 +171,7 @@ class CommandMemoryTest(unittest.TestCase):
         prompt = compose_command_input(
             "Look again",
             "stopped",
-            [record],
+            rendered,
             started_at="2026-06-11T18:06:09+00:00",
         )
         headings = [

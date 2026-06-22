@@ -28,6 +28,12 @@ class AgentRuntimeConfig:
     max_turns: int
     history_commands: int = 4
     full_tool_rounds: int = 6
+    compact_threshold: int = 240000
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    backend: str = "sqlite"
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,8 @@ class AppConfig:
     agent: AgentProfileConfig
     agents: dict[str, AgentProfileConfig]
     agent_runtime: AgentRuntimeConfig
+    memory: MemoryConfig
+    tool_categories: dict[str, str]
     mcp: McpConfig
     audio: AudioConfig
     logging: LoggingConfig
@@ -71,6 +79,7 @@ def load_config(path: Path) -> AppConfig:
     mcp = _table(data, "mcp")
     audio = _table(data, "audio")
     logging_config = _table(data, "logging")
+    memory = _table(data, "memory")
     active_agent, agents, runtime_config = _load_agent_config(data)
 
     return AppConfig(
@@ -78,6 +87,8 @@ def load_config(path: Path) -> AppConfig:
         agent=agents[active_agent],
         agents=agents,
         agent_runtime=runtime_config,
+        memory=MemoryConfig(backend=_memory_backend(memory)),
+        tool_categories=_tool_categories(_table(data, "tool_categories")),
         mcp=McpConfig(url=_string(mcp, "url", "http://localhost:8080/mcp")),
         audio=AudioConfig(
             host=_string(audio, "host", "localhost"),
@@ -116,9 +127,7 @@ def _legacy_agent_config(
 ) -> tuple[str, dict[str, AgentProfileConfig], AgentRuntimeConfig]:
     agent = _table(data, "agent")
     secrets = _table(data, "secrets")
-    backend = _string(agent, "backend", "codex")
-    if backend == "codex":
-        backend = "openai"
+    backend = _string(agent, "backend", "openai")
 
     profile = AgentProfileConfig(
         name="legacy-agent",
@@ -135,6 +144,7 @@ def _legacy_agent_config(
         max_turns=_positive_integer(agent, "max_turns", 50),
         history_commands=_non_negative_integer(agent, "history_commands", 4),
         full_tool_rounds=_non_negative_integer(agent, "full_tool_rounds", 6),
+        compact_threshold=_positive_integer(agent, "compact_threshold", 240000),
     )
     _validate_runtime_config(runtime_config)
     return profile.name, {profile.name: profile}, runtime_config
@@ -169,6 +179,7 @@ def _runtime_config(data: dict[str, Any]) -> AgentRuntimeConfig:
         max_turns=_positive_integer(data, "max_turns", 50),
         history_commands=_non_negative_integer(data, "history_commands", 4),
         full_tool_rounds=_non_negative_integer(data, "full_tool_rounds", 6),
+        compact_threshold=_positive_integer(data, "compact_threshold", 240000),
     )
     _validate_runtime_config(config)
     return config
@@ -260,3 +271,24 @@ def _logging_level(data: dict[str, Any]) -> str:
     if level not in {"info", "debug"}:
         raise ConfigError('logging level must be "info" or "debug".')
     return level
+
+
+def _memory_backend(data: dict[str, Any]) -> str:
+    backend = _string(data, "backend", "sqlite").lower()
+    if backend not in {"sqlite", "none"}:
+        raise ConfigError('[memory].backend must be "sqlite" or "none".')
+    return backend
+
+
+def _tool_categories(data: dict[str, Any]) -> dict[str, str]:
+    from diffbot_agent.episode import TOOL_CATEGORIES
+
+    categories: dict[str, str] = {}
+    for name, value in data.items():
+        if not isinstance(value, str) or value not in TOOL_CATEGORIES:
+            allowed = ", ".join(sorted(TOOL_CATEGORIES))
+            raise ConfigError(
+                f'[tool_categories].{name} must be one of: {allowed}.'
+            )
+        categories[name] = value
+    return categories

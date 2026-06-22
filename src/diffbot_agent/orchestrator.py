@@ -51,7 +51,10 @@ class Orchestrator:
 
         self._turn_running = True
         try:
-            await self._run_command_turn(command)
+            if _is_reset_command(command):
+                await self._reset_context()
+            else:
+                await self._run_command_turn(command)
         except Exception as exc:
             log_event(
                 "command.turn.error",
@@ -69,3 +72,30 @@ class Orchestrator:
     async def _run_command_turn(self, command: str) -> None:
         robot_status = await self.mcp_client.read_robot_status()
         await self.runtime.run_turn(command, robot_status)
+
+    async def _reset_context(self) -> None:
+        await self.runtime.reset()
+        log_event("command.reset", {})
+        print("Context reset: cleared conversation history and memory.", file=sys.stderr)
+
+
+_RESET_COMMANDS = frozenset(
+    {
+        "reset context",
+        "reset the context",
+        "reset memory",
+        "reset your memory",
+        "clear context",
+        "clear the context",
+        "clear memory",
+        "clear your memory",
+        "reset session",
+        "clear session",
+        "forget everything",
+    }
+)
+
+
+def _is_reset_command(command: str) -> bool:
+    normalized = " ".join(command.lower().split()).strip(" .!?,")
+    return normalized in _RESET_COMMANDS

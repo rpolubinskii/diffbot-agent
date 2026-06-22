@@ -7,12 +7,23 @@ requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.62.0",
     "mcp>=1.21.0",
-    "openai-agents>=0.6.0",
+    # Pinned exactly: we depend on Agents SDK internals (guarded by tests).
+    "openai-agents==0.17.4",
     "protobuf>=4.25.0",
 ]
 
 [project.scripts]
 diffbot-agent = "diffbot_agent.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Disable ROS pytest plugins leaked onto PYTHONPATH by a sourced ROS env.
+addopts = "-p no:ament_copyright -p no:ament_flake8 -p no:ament_lint -p no:ament_pep257 -p no:ament_xmllint -p no:launch_ros -p no:launch_testing"
 
 [build-system]
 requires = ["uv_build>=0.11.0,<0.12.0"]

@@ -7,14 +7,21 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
 
-from diffbot_agent.command_memory import (
-    CommandContextState,
-    CommandMemoryStore,
+from datetime import datetime
+
+from diffbot_agent.context_window import CommandContextState, compose_command_input
+from diffbot_agent.episode import (
     build_canonical_record,
-    compose_command_input,
-    sanitize_session_items,
+    set_mcp_tool_categories,
+    set_tool_category_overrides,
     utc_now,
 )
+from diffbot_agent.memory_backend import (
+    MemoryBackend,
+    NullMemoryBackend,
+    SqliteRecencyBackend,
+)
+from diffbot_agent.sanitize import sanitize_session_items
 from diffbot_agent.config import AppConfig, ConfigError
 from diffbot_agent.logging_utils import (
     elapsed_ms,
@@ -34,6 +41,9 @@ Use speak tool as the main way to communicate with the user. Use diffbot-mcp too
 MCP_CLIENT_SESSION_TIMEOUT_SECONDS = 90
 MCP_MAX_RETRY_ATTEMPTS = 0
 
+# Contract with diffbot-mcp ToolCategoryMeta.CATEGORY_KEY — keep in sync.
+TOOL_CATEGORY_META_KEY = "diffbot.dev/category"
+
 
 @dataclass
 class OpenAIAgentsRuntime:
@@ -44,10 +54,12 @@ class OpenAIAgentsRuntime:
         self._agent = None
         self._session = None
         self._model_provider = None
-        self._command_memories: CommandMemoryStore | None = None
+        self._memory: MemoryBackend | None = None
+        self._compact_locally = True
 
     async def start(self) -> None:
         profile = self.config.agent
+        set_tool_category_overrides(self.config.tool_categories)
         if profile.backend == "openai" and not profile.openai_api_key.strip():
             raise ConfigError(f"[agents.{profile.name}].openai_api_key is required for OpenAI.")
         if profile.backend == "ollama" and (
@@ -58,6 +70,7 @@ class OpenAIAgentsRuntime:
         from agents import Agent, SQLiteSession
         from agents import set_default_openai_key
         from agents.mcp import MCPServerStreamableHttp
+        from agents.model_settings import ModelSettings
 
         if profile.backend == "openai":
             set_default_openai_key(profile.openai_api_key)
@@ -72,6 +85,19 @@ class OpenAIAgentsRuntime:
             )
         else:
             raise ConfigError(f'Unsupported agent backend "{profile.backend}".')
+
+        # Ollama has no server-side compaction; it compacts tool rounds locally.
+        self._compact_locally = profile.backend != "openai"
+        model_settings = ModelSettings()
+        if profile.backend == "openai" and self.config.agent_runtime.compact_threshold > 0:
+            model_settings = ModelSettings(
+                context_management=[
+                    {
+                        "type": "compaction",
+                        "compact_threshold": self.config.agent_runtime.compact_threshold,
+                    }
+                ]
+            )
         mcp_server_class = _logging_mcp_server_class(MCPServerStreamableHttp)
 
         stack = AsyncExitStack()
@@ -94,23 +120,25 @@ class OpenAIAgentsRuntime:
                 name="DiffBot",
                 instructions=INSTRUCTIONS,
                 model=profile.model,
+                model_settings=model_settings,
                 mcp_servers=[mcp_server],
                 mcp_config={
                     "convert_schemas_to_strict": True,
                     "include_server_in_tool_names": True,
                 },
             )
+            await _load_mcp_tool_categories(mcp_server)
             session_class = _image_sanitizing_session_class(SQLiteSession)
             self._session = session_class(
                 profile.session_id,
                 profile.session_db,
             )
-            self._command_memories = CommandMemoryStore(profile.session_db)
+            self._memory = _build_memory_backend(self.config)
             self._stack = stack
         except Exception:
-            if self._command_memories is not None:
-                await self._command_memories.close()
-                self._command_memories = None
+            if self._memory is not None:
+                await self._memory.close()
+                self._memory = None
             if self._session is not None:
                 close = getattr(self._session, "close", None)
                 if callable(close):
@@ -125,29 +153,31 @@ class OpenAIAgentsRuntime:
         if (
             self._agent is None
             or self._session is None
-            or self._command_memories is None
+            or self._memory is None
         ):
             raise RuntimeError("OpenAI Agents runtime has not been started.")
 
         from agents import RunConfig, Runner
 
-        recent_memories = await self._command_memories.latest(
-            self.config.agent.session_id,
-            self.config.agent_runtime.history_commands,
-        )
         started_at = utc_now()
         started_monotonic = time.monotonic()
+        historical_memory = await self._memory.recall(
+            query=command,
+            limit=self.config.agent_runtime.history_commands,
+            now=datetime.fromisoformat(started_at),
+        )
         turn_text = compose_command_input(
             command,
             robot_status,
-            recent_memories,
+            historical_memory,
             started_at=started_at,
         )
         command_state = CommandContextState(
             full_tool_rounds=self.config.agent_runtime.full_tool_rounds,
             command=command,
             robot_status=robot_status,
-            recent_memories=tuple(recent_memories),
+            historical_memory=historical_memory,
+            compact_locally=self._compact_locally,
             started_at=started_at,
             started_monotonic=started_monotonic,
         )
@@ -184,7 +214,7 @@ class OpenAIAgentsRuntime:
                 error=exc,
             )
             try:
-                await self._command_memories.add(record)
+                await self._memory.add_episode(record)
             except Exception as memory_exc:
                 log_event(
                     "command.memory.error",
@@ -198,7 +228,7 @@ class OpenAIAgentsRuntime:
             raise
 
         completed_at = utc_now()
-        await self._command_memories.add(
+        await self._memory.add_episode(
             build_canonical_record(
                 session_id=self.config.agent.session_id,
                 started_at=started_at,
@@ -210,6 +240,16 @@ class OpenAIAgentsRuntime:
             )
         )
 
+    async def reset(self) -> None:
+        if self._session is not None:
+            clear = getattr(self._session, "clear_session", None)
+            if callable(clear):
+                result = clear()
+                if inspect.isawaitable(result):
+                    await result
+        if self._memory is not None:
+            await self._memory.reset()
+
     async def stop(self) -> None:
         if self._session is not None:
             close = getattr(self._session, "close", None)
@@ -218,9 +258,9 @@ class OpenAIAgentsRuntime:
                 if inspect.isawaitable(result):
                     await result
             self._session = None
-        if self._command_memories is not None:
-            await self._command_memories.close()
-            self._command_memories = None
+        if self._memory is not None:
+            await self._memory.close()
+            self._memory = None
         if self._stack is not None:
             await self._stack.aclose()
             self._stack = None
@@ -228,7 +268,33 @@ class OpenAIAgentsRuntime:
             self._model_provider = None
 
 
-OpenAICodexRuntime = OpenAIAgentsRuntime
+def _build_memory_backend(config: AppConfig) -> MemoryBackend:
+    if config.memory.backend == "sqlite":
+        return SqliteRecencyBackend(config.agent.session_db, config.agent.session_id)
+    return NullMemoryBackend()
+
+
+async def _load_mcp_tool_categories(mcp_server: Any) -> None:
+    """Read tool categories from MCP ``_meta``; non-fatal (the heuristic covers gaps)."""
+    try:
+        tools = await mcp_server.list_tools()
+    except Exception as exc:
+        log_event(
+            "mcp.tool_categories.error",
+            {"error_type": type(exc).__name__, "error": str(exc)},
+            level=logging.WARNING,
+        )
+        return
+    categories: dict[str, str] = {}
+    for tool in tools or []:
+        name = getattr(tool, "name", None)
+        meta = getattr(tool, "meta", None)
+        if isinstance(name, str) and isinstance(meta, dict):
+            category = meta.get(TOOL_CATEGORY_META_KEY)
+            if isinstance(category, str) and category:
+                categories[name] = category
+    set_mcp_tool_categories(categories)
+    log_event("mcp.tool_categories.loaded", {"count": len(categories)})
 
 
 def _build_run_hooks(

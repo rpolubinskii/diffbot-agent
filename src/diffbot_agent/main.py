@@ -8,11 +8,11 @@ from pathlib import Path
 
 from diffbot_agent.agent_runtime import AgentRuntime
 from diffbot_agent.audio_client import AudioCommandClient
-from diffbot_agent.command_memory import clear_command_memories
+from diffbot_agent.memory_backend import clear_command_memories
 from diffbot_agent.config import AppConfig, ConfigError, load_config
 from diffbot_agent.logging_utils import configure_logging
 from diffbot_agent.mcp_client import DiffbotMcpClient
-from diffbot_agent.openai_codex_runtime import OpenAIAgentsRuntime
+from diffbot_agent.openai_agents_runtime import OpenAIAgentsRuntime
 from diffbot_agent.orchestrator import Orchestrator
 
 

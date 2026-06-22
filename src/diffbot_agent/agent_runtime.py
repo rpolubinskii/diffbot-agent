@@ -10,5 +10,8 @@ class AgentRuntime(Protocol):
     async def run_turn(self, command: str, robot_status: str) -> None:
         """Run one user command turn against the existing session."""
 
+    async def reset(self) -> None:
+        """Clear conversation history and cross-command memory in place."""
+
     async def stop(self) -> None:
         """Release runtime resources."""
