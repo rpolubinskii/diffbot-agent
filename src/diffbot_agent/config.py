@@ -26,6 +26,14 @@ class AgentProfileConfig:
 class AgentRuntimeConfig:
     busy_policy: str
     max_turns: int
+    history_commands: int = 4
+    full_tool_rounds: int = 6
+    compact_threshold: int = 240000
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    backend: str = "sqlite"
 
 
 @dataclass(frozen=True)
@@ -42,13 +50,21 @@ class AudioConfig:
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    level: str
+
+
+@dataclass(frozen=True)
 class AppConfig:
     active_agent: str
     agent: AgentProfileConfig
     agents: dict[str, AgentProfileConfig]
     agent_runtime: AgentRuntimeConfig
+    memory: MemoryConfig
+    tool_categories: dict[str, str]
     mcp: McpConfig
     audio: AudioConfig
+    logging: LoggingConfig
 
 
 def load_config(path: Path) -> AppConfig:
@@ -62,6 +78,8 @@ def load_config(path: Path) -> AppConfig:
 
     mcp = _table(data, "mcp")
     audio = _table(data, "audio")
+    logging_config = _table(data, "logging")
+    memory = _table(data, "memory")
     active_agent, agents, runtime_config = _load_agent_config(data)
 
     return AppConfig(
@@ -69,6 +87,8 @@ def load_config(path: Path) -> AppConfig:
         agent=agents[active_agent],
         agents=agents,
         agent_runtime=runtime_config,
+        memory=MemoryConfig(backend=_memory_backend(memory)),
+        tool_categories=_tool_categories(_table(data, "tool_categories")),
         mcp=McpConfig(url=_string(mcp, "url", "http://localhost:8080/mcp")),
         audio=AudioConfig(
             host=_string(audio, "host", "localhost"),
@@ -76,6 +96,7 @@ def load_config(path: Path) -> AppConfig:
             voice_stream_enabled=_boolean(audio, "voice_stream_enabled", False),
             reconnect_delay_seconds=_number(audio, "reconnect_delay_seconds", 2.0),
         ),
+        logging=LoggingConfig(level=_logging_level(logging_config)),
     )
 
 
@@ -106,9 +127,7 @@ def _legacy_agent_config(
 ) -> tuple[str, dict[str, AgentProfileConfig], AgentRuntimeConfig]:
     agent = _table(data, "agent")
     secrets = _table(data, "secrets")
-    backend = _string(agent, "backend", "codex")
-    if backend == "codex":
-        backend = "openai"
+    backend = _string(agent, "backend", "openai")
 
     profile = AgentProfileConfig(
         name="legacy-agent",
@@ -123,6 +142,9 @@ def _legacy_agent_config(
     runtime_config = AgentRuntimeConfig(
         busy_policy=_string(agent, "busy_policy", "ignore"),
         max_turns=_positive_integer(agent, "max_turns", 50),
+        history_commands=_non_negative_integer(agent, "history_commands", 4),
+        full_tool_rounds=_non_negative_integer(agent, "full_tool_rounds", 6),
+        compact_threshold=_positive_integer(agent, "compact_threshold", 240000),
     )
     _validate_runtime_config(runtime_config)
     return profile.name, {profile.name: profile}, runtime_config
@@ -155,6 +177,9 @@ def _runtime_config(data: dict[str, Any]) -> AgentRuntimeConfig:
     config = AgentRuntimeConfig(
         busy_policy=_string(data, "busy_policy", "ignore"),
         max_turns=_positive_integer(data, "max_turns", 50),
+        history_commands=_non_negative_integer(data, "history_commands", 4),
+        full_tool_rounds=_non_negative_integer(data, "full_tool_rounds", 6),
+        compact_threshold=_positive_integer(data, "compact_threshold", 240000),
     )
     _validate_runtime_config(config)
     return config
@@ -218,6 +243,13 @@ def _positive_integer(data: dict[str, Any], key: str, default: int) -> int:
     return value
 
 
+def _non_negative_integer(data: dict[str, Any], key: str, default: int) -> int:
+    value = _integer(data, key, default)
+    if value < 0:
+        raise ConfigError(f"{key} must be greater than or equal to zero.")
+    return value
+
+
 def _number(data: dict[str, Any], key: str, default: float) -> float:
     value = data.get(key, default)
     if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -232,3 +264,31 @@ def _boolean(data: dict[str, Any], key: str, default: bool) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{key} must be true or false.")
     return value
+
+
+def _logging_level(data: dict[str, Any]) -> str:
+    level = _string(data, "level", "info").lower()
+    if level not in {"info", "debug"}:
+        raise ConfigError('logging level must be "info" or "debug".')
+    return level
+
+
+def _memory_backend(data: dict[str, Any]) -> str:
+    backend = _string(data, "backend", "sqlite").lower()
+    if backend not in {"sqlite", "none"}:
+        raise ConfigError('[memory].backend must be "sqlite" or "none".')
+    return backend
+
+
+def _tool_categories(data: dict[str, Any]) -> dict[str, str]:
+    from diffbot_agent.episode import TOOL_CATEGORIES
+
+    categories: dict[str, str] = {}
+    for name, value in data.items():
+        if not isinstance(value, str) or value not in TOOL_CATEGORIES:
+            allowed = ", ".join(sorted(TOOL_CATEGORIES))
+            raise ConfigError(
+                f'[tool_categories].{name} must be one of: {allowed}.'
+            )
+        categories[name] = value
+    return categories

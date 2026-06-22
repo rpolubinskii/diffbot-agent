@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Any
@@ -68,6 +69,7 @@ class DiffbotMcpClient:
                         "duration_ms": elapsed_ms(started),
                         "raw_result": raw_result,
                     },
+                    level=logging.WARNING,
                 )
             text = _extract_text(result)
             if not text:
@@ -91,6 +93,7 @@ class DiffbotMcpClient:
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                 },
+                level=logging.ERROR,
             )
             raise
 
@@ -98,23 +101,6 @@ class DiffbotMcpClient:
         if self._session is None:
             raise DiffbotMcpError("MCP client has not been started.")
         return self._session
-
-
-def compose_command_turn(vocal_command: str, robot_status: str) -> str:
-    return f"""You are controlling a differential drive robot.
-
-Vocal command:
-{vocal_command}
-
-Operator text:
-
-Robot status:
-{robot_status}
-
-Rules:
-- Use speak tool as the main way to communicate with the user.
-- Stop or cancel motion on uncertainty, failed motion, timeout, or interruption.
-"""
 
 
 def _extract_text(value: Any) -> str:

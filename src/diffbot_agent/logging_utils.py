@@ -21,18 +21,24 @@ _SECRET_KEY_PATTERN = re.compile(
 )
 _OPENAI_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _BEARER_PATTERN = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]+\b", re.IGNORECASE)
+_IMAGE_DATA_URL_PATTERN = re.compile(
+    r"data:image/[A-Za-z0-9.+-]+;base64,[A-Za-z0-9+/=]+",
+    re.IGNORECASE,
+)
 _MASK = "[redacted]"
+_IMAGE_MASK = "[camera image redacted]"
+_IMAGE_TYPES = {"image", "input_image", "computer_screenshot"}
 
 
-def configure_logging() -> None:
+def configure_logging(level: str) -> None:
     logger = logging.getLogger(LOGGER_NAME)
-    if logger.handlers:
-        return
-
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG if level == "debug" else logging.INFO)
     logger.propagate = False
 
 
@@ -40,7 +46,7 @@ def log_event(
     event: str,
     payload: Mapping[str, Any] | None = None,
     *,
-    level: int = logging.INFO,
+    level: int = logging.DEBUG,
 ) -> None:
     logger = logging.getLogger(LOGGER_NAME)
     if not logger.isEnabledFor(level):
@@ -60,6 +66,20 @@ def log_event(
     )
 
 
+def log_by_verbosity(
+    *,
+    debug_event: str,
+    debug_payload: Mapping[str, Any] | None = None,
+    info_event: str | None = None,
+    info_payload: Mapping[str, Any] | None = None,
+) -> None:
+    logger = logging.getLogger(LOGGER_NAME)
+    if logger.isEnabledFor(logging.DEBUG):
+        log_event(debug_event, debug_payload, level=logging.DEBUG)
+    elif info_event is not None:
+        log_event(info_event, info_payload, level=logging.INFO)
+
+
 def monotonic_ms() -> float:
     return time.monotonic() * 1000
 
@@ -70,11 +90,16 @@ def elapsed_ms(start_ms: float) -> int:
 
 def redact(value: Any) -> Any:
     if isinstance(value, Mapping):
+        value_type = str(value.get("type", "")).lower()
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
             if _SECRET_KEY_PATTERN.search(key_text):
                 redacted[key_text] = _MASK
+            elif key_text in {"image_url", "file_data"}:
+                redacted[key_text] = _IMAGE_MASK
+            elif value_type in _IMAGE_TYPES and key_text == "data":
+                redacted[key_text] = _IMAGE_MASK
             else:
                 redacted[key_text] = redact(item)
         return redacted
@@ -84,7 +109,8 @@ def redact(value: Any) -> Any:
     if isinstance(value, tuple):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        return _BEARER_PATTERN.sub("Bearer [redacted]", _OPENAI_KEY_PATTERN.sub(_MASK, value))
+        redacted = _IMAGE_DATA_URL_PATTERN.sub(_IMAGE_MASK, value)
+        return _BEARER_PATTERN.sub("Bearer [redacted]", _OPENAI_KEY_PATTERN.sub(_MASK, redacted))
     return value
 
 
