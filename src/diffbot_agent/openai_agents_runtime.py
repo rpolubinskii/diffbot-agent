@@ -23,14 +23,12 @@ from diffbot_agent.memory_backend import (
     NullMemoryBackend,
     SqliteRecencyBackend,
 )
+from diffbot_agent.mcp_logging import McpRunLogger
 from diffbot_agent.sanitize import sanitize_session_items
 from diffbot_agent.config import AppConfig, ConfigError
 from diffbot_agent.logging_utils import (
-    elapsed_ms,
-    has_error_marker,
     log_event,
     log_by_verbosity,
-    monotonic_ms,
     serialize_for_json,
 )
 
@@ -101,9 +99,12 @@ class OpenAIAgentsRuntime:
                     }
                 ]
             )
-        mcp_server_class = _logging_mcp_server_class(MCPServerStreamableHttp)
         elicitation_callback = build_elicitation_callback(
             self.elicitation_answer_provider or _cancel_elicitation
+        )
+        mcp_server_class, mcp_server_extra_kwargs = _mcp_server_class_and_kwargs(
+            MCPServerStreamableHttp,
+            elicitation_callback,
         )
 
         stack = AsyncExitStack()
@@ -119,7 +120,7 @@ class OpenAIAgentsRuntime:
                     cache_tools_list=True,
                     client_session_timeout_seconds=MCP_CLIENT_SESSION_TIMEOUT_SECONDS,
                     max_retry_attempts=MCP_MAX_RETRY_ATTEMPTS,
-                    elicitation_callback=elicitation_callback,
+                    **mcp_server_extra_kwargs,
                 )
             )
 
@@ -197,6 +198,7 @@ class OpenAIAgentsRuntime:
             run_config_kwargs["model_provider"] = self._model_provider
         run_config = RunConfig(**run_config_kwargs)
         run_hooks = _build_run_hooks(self.config, command_state)
+        mcp_logger = McpRunLogger()
         result = Runner.run_streamed(
             self._agent,
             turn_text,
@@ -206,9 +208,10 @@ class OpenAIAgentsRuntime:
             session=self._session,
         )
         try:
-            async for _event in result.stream_events():
-                pass
+            async for event in result.stream_events():
+                mcp_logger.handle_event(event)
         except Exception as exc:
+            mcp_logger.log_pending_errors(exc)
             completed_at = utc_now()
             record = build_canonical_record(
                 session_id=self.config.agent.session_id,
@@ -416,8 +419,19 @@ def _completion_status(error: BaseException) -> str:
     return "failed"
 
 
-def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
-    class LoggingMCPServerStreamableHttp(base_class):  # type: ignore[misc, valid-type]
+def _mcp_server_class_and_kwargs(
+    base_class: type[Any],
+    elicitation_callback: Any,
+) -> tuple[type[Any], dict[str, Any]]:
+    if "elicitation_callback" in inspect.signature(base_class).parameters:
+        return base_class, {"elicitation_callback": elicitation_callback}
+    return _elicitation_mcp_server_class(base_class), {
+        "elicitation_callback": elicitation_callback,
+    }
+
+
+def _elicitation_mcp_server_class(base_class: type[Any]) -> type[Any]:
+    class ElicitationMCPServerStreamableHttp(base_class):  # type: ignore[misc, valid-type]
         def __init__(
             self,
             *args: Any,
@@ -499,90 +513,4 @@ def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
                 await session.initialize()
                 yield session
 
-        async def list_tools(self, *args: Any, **kwargs: Any) -> Any:
-            started = monotonic_ms()
-            log_event(
-                "mcp.list_tools.request",
-                {"server": self.name},
-            )
-            try:
-                result = await super().list_tools(*args, **kwargs)
-                log_event(
-                    "mcp.list_tools.response",
-                    {
-                        "server": self.name,
-                        "duration_ms": elapsed_ms(started),
-                        "tools": serialize_for_json(result),
-                    },
-                )
-                return result
-            except Exception as exc:
-                log_event(
-                    "mcp.list_tools.error",
-                    {
-                        "server": self.name,
-                        "duration_ms": elapsed_ms(started),
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                    level=logging.ERROR,
-                )
-                raise
-
-        async def call_tool(
-            self,
-            tool_name: str,
-            arguments: dict[str, Any] | None,
-            meta: dict[str, Any] | None = None,
-        ) -> Any:
-            started = monotonic_ms()
-            log_by_verbosity(
-                debug_event="mcp.tool.request",
-                debug_payload={
-                    "server": self.name,
-                    "tool": tool_name,
-                    "arguments": arguments,
-                    "meta": meta,
-                },
-                info_event="mcp.tool.call",
-                info_payload={"tool": tool_name},
-            )
-            try:
-                result = await super().call_tool(tool_name, arguments, meta=meta)
-                serialized_result = serialize_for_json(result)
-                log_event(
-                    "mcp.tool.response",
-                    {
-                        "server": self.name,
-                        "tool": tool_name,
-                        "duration_ms": elapsed_ms(started),
-                        "result": serialized_result,
-                    },
-                )
-                if has_error_marker(serialized_result):
-                    log_event(
-                        "mcp.tool.result_error",
-                        {
-                            "server": self.name,
-                            "tool": tool_name,
-                            "duration_ms": elapsed_ms(started),
-                            "result": serialized_result,
-                        },
-                        level=logging.WARNING,
-                    )
-                return result
-            except Exception as exc:
-                log_event(
-                    "mcp.tool.error",
-                    {
-                        "server": self.name,
-                        "tool": tool_name,
-                        "duration_ms": elapsed_ms(started),
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
-                    },
-                    level=logging.ERROR,
-                )
-                raise
-
-    return LoggingMCPServerStreamableHttp
+    return ElicitationMCPServerStreamableHttp
