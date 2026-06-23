@@ -13,12 +13,21 @@ from diffbot_agent.config import AppConfig, ConfigError, load_config
 from diffbot_agent.logging_utils import configure_logging
 from diffbot_agent.mcp_client import DiffbotMcpClient
 from diffbot_agent.openai_agents_runtime import OpenAIAgentsRuntime
+from diffbot_agent.operator_input import OperatorInputCoordinator
 from diffbot_agent.orchestrator import Orchestrator
 
 
-def build_runtime(config: AppConfig) -> AgentRuntime:
+def build_runtime(
+    config: AppConfig,
+    input_coordinator: OperatorInputCoordinator | None = None,
+) -> AgentRuntime:
     if config.agent.backend in {"openai", "ollama"}:
-        return OpenAIAgentsRuntime(config)
+        return OpenAIAgentsRuntime(
+            config,
+            elicitation_answer_provider=(
+                input_coordinator.request_answer if input_coordinator is not None else None
+            ),
+        )
     raise ConfigError(f'Unsupported agent backend "{config.agent.backend}".')
 
 
@@ -67,10 +76,17 @@ def main() -> None:
             )
             return
 
-        runtime = build_runtime(config)
+        input_coordinator = OperatorInputCoordinator()
+        runtime = build_runtime(config, input_coordinator)
         mcp_client = DiffbotMcpClient(config.mcp.url)
         audio_client = AudioCommandClient(config.audio)
-        orchestrator = Orchestrator(config, runtime, mcp_client, audio_client)
+        orchestrator = Orchestrator(
+            config,
+            runtime,
+            mcp_client,
+            audio_client,
+            input_coordinator,
+        )
         asyncio.run(orchestrator.run())
     except KeyboardInterrupt:
         pass

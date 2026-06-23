@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 import time
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from diffbot_agent.context_window import CommandContextState, compose_command_input
+from diffbot_agent.elicitation import ElicitationAnswerProvider, build_elicitation_callback
 from diffbot_agent.episode import (
     build_canonical_record,
     set_mcp_tool_categories,
@@ -48,6 +50,7 @@ TOOL_CATEGORY_META_KEY = "diffbot.dev/category"
 @dataclass
 class OpenAIAgentsRuntime:
     config: AppConfig
+    elicitation_answer_provider: ElicitationAnswerProvider | None = None
 
     def __post_init__(self) -> None:
         self._stack: AsyncExitStack | None = None
@@ -99,6 +102,9 @@ class OpenAIAgentsRuntime:
                 ]
             )
         mcp_server_class = _logging_mcp_server_class(MCPServerStreamableHttp)
+        elicitation_callback = build_elicitation_callback(
+            self.elicitation_answer_provider or _cancel_elicitation
+        )
 
         stack = AsyncExitStack()
         try:
@@ -113,6 +119,7 @@ class OpenAIAgentsRuntime:
                     cache_tools_list=True,
                     client_session_timeout_seconds=MCP_CLIENT_SESSION_TIMEOUT_SECONDS,
                     max_retry_attempts=MCP_MAX_RETRY_ATTEMPTS,
+                    elicitation_callback=elicitation_callback,
                 )
             )
 
@@ -274,6 +281,11 @@ def _build_memory_backend(config: AppConfig) -> MemoryBackend:
     return NullMemoryBackend()
 
 
+async def _cancel_elicitation(timeout_seconds: float) -> str | None:
+    del timeout_seconds
+    return None
+
+
 async def _load_mcp_tool_categories(mcp_server: Any) -> None:
     """Read tool categories from MCP ``_meta``; non-fatal (the heuristic covers gaps)."""
     try:
@@ -406,6 +418,87 @@ def _completion_status(error: BaseException) -> str:
 
 def _logging_mcp_server_class(base_class: type[Any]) -> type[Any]:
     class LoggingMCPServerStreamableHttp(base_class):  # type: ignore[misc, valid-type]
+        def __init__(
+            self,
+            *args: Any,
+            elicitation_callback: Any | None = None,
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(*args, **kwargs)
+            self.elicitation_callback = elicitation_callback
+
+        async def connect(self) -> None:
+            from agents.exceptions import UserError
+            from agents.mcp.server import ClientSession, httpx, logger
+
+            connection_succeeded = False
+            try:
+                transport = await self.exit_stack.enter_async_context(self.create_streams())
+                read, write, *rest = transport
+                self._get_session_id = rest[0] if rest and callable(rest[0]) else None
+
+                session = await self.exit_stack.enter_async_context(
+                    ClientSession(
+                        read,
+                        write,
+                        timedelta(seconds=self.client_session_timeout_seconds)
+                        if self.client_session_timeout_seconds
+                        else None,
+                        elicitation_callback=self.elicitation_callback,
+                        message_handler=self.message_handler,
+                    )
+                )
+                server_result = await session.initialize()
+                self.server_initialize_result = server_result
+                self.session = session
+                connection_succeeded = True
+            except Exception as exc:
+                http_error = self._extract_http_error_from_exception(exc)
+                if http_error:
+                    self._raise_user_error_for_http_error(http_error)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                if isinstance(exc, httpx.HTTPStatusError | httpx.ConnectError | httpx.TimeoutException):
+                    self._raise_user_error_for_http_error(exc)
+                raise
+            finally:
+                if not connection_succeeded:
+                    try:
+                        await self.cleanup()
+                    except UserError:
+                        raise
+                    except Exception as cleanup_error:
+                        if isinstance(cleanup_error, RuntimeError) and "cancel scope" in str(cleanup_error):
+                            logger.debug(
+                                "Ignoring cancel scope error during cleanup of MCP server "
+                                f"'{self.name}': {cleanup_error}"
+                            )
+                        else:
+                            logger.warning(
+                                f"Error during cleanup of MCP server '{self.name}': {cleanup_error}"
+                            )
+
+        @asynccontextmanager
+        async def _isolated_client_session(self) -> Any:
+            from agents.mcp.server import ClientSession
+
+            async with AsyncExitStack() as exit_stack:
+                transport = await exit_stack.enter_async_context(self.create_streams())
+                read, write, *_ = transport
+                session = await exit_stack.enter_async_context(
+                    ClientSession(
+                        read,
+                        write,
+                        timedelta(seconds=self.client_session_timeout_seconds)
+                        if self.client_session_timeout_seconds
+                        else None,
+                        elicitation_callback=self.elicitation_callback,
+                        message_handler=self.message_handler,
+                    )
+                )
+                await session.initialize()
+                yield session
+
         async def list_tools(self, *args: Any, **kwargs: Any) -> Any:
             started = monotonic_ms()
             log_event(
