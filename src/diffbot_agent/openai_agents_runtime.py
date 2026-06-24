@@ -19,6 +19,7 @@ from diffbot_agent.episode import (
     utc_now,
 )
 from diffbot_agent.memory_backend import (
+    DiffbotMcpMemoryBackend,
     MemoryBackend,
     NullMemoryBackend,
     SqliteRecencyBackend,
@@ -142,6 +143,7 @@ class OpenAIAgentsRuntime:
                 profile.session_db,
             )
             self._memory = _build_memory_backend(self.config)
+            await self._memory.start()
             self._stack = stack
         except Exception:
             if self._memory is not None:
@@ -279,6 +281,8 @@ class OpenAIAgentsRuntime:
 
 
 def _build_memory_backend(config: AppConfig) -> MemoryBackend:
+    if config.memory.backend == "diffbot_memory":
+        return DiffbotMcpMemoryBackend(config.mcp.url)
     if config.memory.backend == "sqlite":
         return SqliteRecencyBackend(config.agent.session_db, config.agent.session_id)
     return NullMemoryBackend()

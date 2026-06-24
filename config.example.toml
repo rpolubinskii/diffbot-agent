@@ -15,8 +15,10 @@ compact_threshold = 240000
 full_tool_rounds = 10000000
 
 [memory]
-# Cross-command memory backend. "sqlite" = local recency-based records (default).
-# "none" disables memory. A future "diffbot_rag" (Graphiti) backend slots in here.
+# Cross-command memory backend:
+#   "sqlite"         local recency-based records (default, offline)
+#   "diffbot_memory" persistent Graphiti memory via diffbot-mcp's memory.* tools
+#   "none"           disabled
 backend = "sqlite"
 
 # Optional: override the category diffbot-mcp advertises for a tool (it normally

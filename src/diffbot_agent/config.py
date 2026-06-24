@@ -275,8 +275,8 @@ def _logging_level(data: dict[str, Any]) -> str:
 
 def _memory_backend(data: dict[str, Any]) -> str:
     backend = _string(data, "backend", "sqlite").lower()
-    if backend not in {"sqlite", "none"}:
-        raise ConfigError('[memory].backend must be "sqlite" or "none".')
+    if backend not in {"sqlite", "none", "diffbot_memory"}:
+        raise ConfigError('[memory].backend must be "sqlite", "none", or "diffbot_memory".')
     return backend
 
 

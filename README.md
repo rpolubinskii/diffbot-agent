@@ -54,9 +54,11 @@ round after one use). Camera-image freshness is managed in both cases: only the
 latest valid image is kept, and it is invalidated when the robot moves.
 
 `[memory].backend` selects the cross-command memory backend: `sqlite` (recency-based
-local records, the default) or `none`. The backend is pluggable behind a small
-interface so a future `diffbot-rag` (Graphiti) backend can replace it without
-touching the runtime. Tool categories (speech/navigation/safety/status/vision) are
+local records, the default), `diffbot_memory` (persistent Graphiti memory via
+diffbot-mcp's `memory.remember`/`memory.recall` tools), or `none`. The backend is
+pluggable behind a small interface. With `diffbot_memory`, writes are fire-and-forget
+and recall degrades to no memory if the service is unreachable, so the agent runs
+regardless. Tool categories (speech/navigation/safety/status/vision) are
 advertised by diffbot-mcp in each tool's MCP `_meta` and read at startup — the agent
 does not enumerate tools. Override a specific tool under `[tool_categories]`.
 

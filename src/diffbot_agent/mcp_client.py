@@ -97,6 +97,35 @@ class DiffbotMcpClient:
             )
             raise
 
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+        session = self._require_session()
+        started = monotonic_ms()
+        log_event("mcp.tool.request", {"tool": name})
+        try:
+            result = await session.call_tool(name, arguments)
+            serialized = serialize_for_json(result)
+            if has_error_marker(serialized):
+                log_event(
+                    "mcp.tool.result_error",
+                    {"tool": name, "duration_ms": elapsed_ms(started), "result": serialized},
+                    level=logging.WARNING,
+                )
+            else:
+                log_event("mcp.tool.response", {"tool": name, "duration_ms": elapsed_ms(started)})
+            return serialized
+        except Exception as exc:
+            log_event(
+                "mcp.tool.error",
+                {
+                    "tool": name,
+                    "duration_ms": elapsed_ms(started),
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+                level=logging.ERROR,
+            )
+            raise
+
     def _require_session(self) -> ClientSession:
         if self._session is None:
             raise DiffbotMcpError("MCP client has not been started.")

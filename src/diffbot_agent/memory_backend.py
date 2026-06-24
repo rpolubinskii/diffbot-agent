@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from diffbot_agent.episode import CanonicalCommandRecord, render_recent_memories
+from diffbot_agent.logging_utils import log_event
+from diffbot_agent.mcp_client import DiffbotMcpClient
 
 
 EMPTY_MEMORY = "(none)"
@@ -15,8 +19,10 @@ EMPTY_MEMORY = "(none)"
 
 @runtime_checkable
 class MemoryBackend(Protocol):
-    """Cross-command memory seam: default is SQLite recency; a future
-    ``DiffbotRagBackend`` (Graphiti behind ``diffbot-rag``) drops in unchanged."""
+    """Cross-command memory seam: SQLite recency (default), or ``DiffbotMcpMemoryBackend``
+    (Graphiti via diffbot-mcp)."""
+
+    async def start(self) -> None: ...
 
     async def add_episode(self, record: CanonicalCommandRecord) -> None: ...
 
@@ -30,6 +36,9 @@ class MemoryBackend(Protocol):
 
 class NullMemoryBackend:
     """No-op backend used when memory is disabled."""
+
+    async def start(self) -> None:
+        return None
 
     async def add_episode(self, record: CanonicalCommandRecord) -> None:
         return None
@@ -51,6 +60,9 @@ class SqliteRecencyBackend:
         self.session_id = session_id
         self._store = CommandMemoryStore(db_path)
 
+    async def start(self) -> None:
+        return None
+
     async def add_episode(self, record: CanonicalCommandRecord) -> None:
         await self._store.add(record)
 
@@ -63,6 +75,132 @@ class SqliteRecencyBackend:
 
     async def close(self) -> None:
         await self._store.close()
+
+
+class DiffbotMcpMemoryBackend:
+    """Persistent memory via diffbot-mcp's ``memory.remember`` / ``memory.recall`` tools
+    (Graphiti behind the gateway). Writes are fire-and-forget; recall awaits without a
+    timeout and degrades to ``"(none)"`` if the service is unreachable."""
+
+    def __init__(self, mcp_url: str, client: DiffbotMcpClient | None = None):
+        self._client = client if client is not None else DiffbotMcpClient(mcp_url)
+        self._connected = False
+        self._pending: set[asyncio.Task[None]] = set()
+
+    async def start(self) -> None:
+        try:
+            await self._client.start()
+            self._connected = True
+        except Exception as exc:
+            log_event(
+                "memory.connect.error",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+                level=logging.WARNING,
+            )
+            self._connected = False
+
+    async def add_episode(self, record: CanonicalCommandRecord) -> None:
+        if not self._connected:
+            return
+        content = json.dumps(record.compact_dict(), ensure_ascii=False)
+        task = asyncio.create_task(self._remember(content))
+        self._pending.add(task)
+        task.add_done_callback(self._pending.discard)
+
+    async def _remember(self, content: str) -> None:
+        try:
+            await self._client.call_tool("memory.remember", {"content": content})
+        except Exception as exc:
+            log_event(
+                "memory.remember.error",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+                level=logging.WARNING,
+            )
+
+    async def recall(self, *, query: str, limit: int, now: datetime) -> str:
+        del limit, now  # diffbot-mcp bounds results; Graphiti tracks time
+        if not self._connected:
+            return EMPTY_MEMORY
+        try:
+            result = await self._client.call_tool("memory.recall", {"query": query})
+        except Exception as exc:
+            log_event(
+                "memory.recall.error",
+                {"error_type": type(exc).__name__, "error": str(exc)},
+                level=logging.WARNING,
+            )
+            return EMPTY_MEMORY
+        return render_facts(result)
+
+    async def reset(self) -> None:
+        # Non-destructive: the persistent graph survives "reset context". A full wipe
+        # is a separate explicit operation.
+        return None
+
+    async def close(self) -> None:
+        if self._pending:
+            await asyncio.gather(*list(self._pending), return_exceptions=True)
+        if self._connected:
+            await self._client.stop()
+            self._connected = False
+
+
+def render_facts(result: Any) -> str:
+    facts = _extract_facts(result)
+    lines: list[str] = []
+    for fact in facts:
+        if isinstance(fact, dict):
+            text = fact.get("fact") or fact.get("name") or fact.get("content")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            valid_at = fact.get("valid_at")
+            invalid_at = fact.get("invalid_at")
+            if valid_at:
+                span = f"{valid_at}..{invalid_at}" if invalid_at else str(valid_at)
+                lines.append(f"[{span}] {text.strip()}")
+            else:
+                lines.append(text.strip())
+        elif isinstance(fact, str) and fact.strip():
+            lines.append(fact.strip())
+    return "\n".join(lines) if lines else EMPTY_MEMORY
+
+
+def _extract_facts(result: Any) -> list[Any]:
+    payload = _result_payload(result)
+    if isinstance(payload, dict):
+        if payload.get("ok") is False or payload.get("error_class"):
+            return []
+        for key in ("facts", "results", "edges"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        return []
+    if isinstance(payload, list):
+        return payload
+    return []
+
+
+def _result_payload(result: Any) -> Any:
+    if not isinstance(result, dict):
+        return result
+    for key in ("structuredContent", "structured_content"):
+        structured = result.get(key)
+        if isinstance(structured, dict):
+            return structured
+    content = result.get("content")
+    if isinstance(content, list):
+        texts = [
+            item.get("text")
+            for item in content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ]
+        if len(texts) == 1:
+            try:
+                return json.loads(texts[0])
+            except json.JSONDecodeError:
+                return texts[0]
+        return texts
+    return result
 
 
 class CommandMemoryStore:
