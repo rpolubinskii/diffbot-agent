@@ -10,7 +10,11 @@ from typing import Any
 from datetime import timedelta
 
 from diffbot_agent.context_window import CommandContextState, compose_command_input
-from diffbot_agent.elicitation import ElicitationAnswerProvider, build_elicitation_callback
+from diffbot_agent.elicitation import (
+    DEFAULT_ELICITATION_TIMEOUT_SECONDS,
+    ElicitationAnswerProvider,
+    build_elicitation_callback,
+)
 from diffbot_agent.episode import (
     build_canonical_record,
     set_mcp_tool_categories,
@@ -42,6 +46,16 @@ Use memory.recall to look up durable facts you may have learned earlier or in pa
 
 MCP_CLIENT_SESSION_TIMEOUT_SECONDS = 90
 MCP_MAX_RETRY_ATTEMPTS = 0
+MCP_SAFE_RETRY_TOOLS = frozenset(
+    {
+        "robot.get_status",
+        "robot.get_diagnostics",
+        "nav.get_pose",
+        "vision.get_camera_image",
+        "system.wait",
+    }
+)
+SPEAK_ASK_TOOL = "speak.ask"
 
 # Contract with diffbot-mcp ToolCategoryMeta.CATEGORY_KEY — keep in sync.
 TOOL_CATEGORY_META_KEY = "diffbot.dev/category"
@@ -403,25 +417,31 @@ def _mcp_server_class_and_kwargs(
     base_class: type[Any],
     elicitation_callback: Any,
 ) -> tuple[type[Any], dict[str, Any]]:
-    if "elicitation_callback" in inspect.signature(base_class).parameters:
-        return base_class, {"elicitation_callback": elicitation_callback}
-    return _elicitation_mcp_server_class(base_class), {
+    return _diffbot_mcp_server_class(base_class), {
         "elicitation_callback": elicitation_callback,
     }
 
 
-def _elicitation_mcp_server_class(base_class: type[Any]) -> type[Any]:
-    class ElicitationMCPServerStreamableHttp(base_class):  # type: ignore[misc, valid-type]
+def _diffbot_mcp_server_class(base_class: type[Any]) -> type[Any]:
+    base_supports_elicitation = "elicitation_callback" in inspect.signature(base_class).parameters
+
+    class DiffbotMCPServerStreamableHttp(base_class):  # type: ignore[misc, valid-type]
         def __init__(
             self,
             *args: Any,
             elicitation_callback: Any | None = None,
             **kwargs: Any,
         ) -> None:
+            if base_supports_elicitation:
+                kwargs["elicitation_callback"] = elicitation_callback
             super().__init__(*args, **kwargs)
             self.elicitation_callback = elicitation_callback
 
         async def connect(self) -> None:
+            if base_supports_elicitation:
+                await super().connect()
+                return
+
             from agents.exceptions import UserError
             from agents.mcp.server import ClientSession, httpx, logger
 
@@ -493,4 +513,167 @@ def _elicitation_mcp_server_class(base_class: type[Any]) -> type[Any]:
                 await session.initialize()
                 yield session
 
-    return ElicitationMCPServerStreamableHttp
+        async def call_tool(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None = None,
+        ) -> Any:
+            from agents.exceptions import UserError
+
+            if not self.session:
+                raise UserError("Server not initialized. Make sure you call `connect()` first.")
+
+            prepared_arguments = _mcp_tool_arguments(tool_name, arguments)
+            self._validate_required_parameters(tool_name=tool_name, arguments=prepared_arguments)
+            try:
+                return await self._call_tool_once(tool_name, prepared_arguments, meta)
+            except BaseException as exc:
+                if isinstance(exc, asyncio.CancelledError) or not _is_fatal_mcp_session_error(exc):
+                    _raise_mcp_tool_error(self, tool_name, exc)
+                await self._reconnect_after_mcp_session_failure(tool_name, exc)
+                if tool_name in MCP_SAFE_RETRY_TOOLS:
+                    log_event(
+                        "mcp.session.retry_safe_tool",
+                        {"server": self.name, "tool": tool_name},
+                    )
+                    try:
+                        return await self._call_tool_once(tool_name, prepared_arguments, meta)
+                    except BaseException as retry_exc:
+                        if isinstance(retry_exc, asyncio.CancelledError):
+                            raise
+                        _raise_mcp_tool_error(self, tool_name, retry_exc)
+                _raise_mcp_tool_error(self, tool_name, exc)
+
+        async def _call_tool_once(
+            self,
+            tool_name: str,
+            arguments: dict[str, Any] | None,
+            meta: dict[str, Any] | None,
+        ) -> Any:
+            session = self.session
+            assert session is not None
+            if meta is None:
+                return await self._maybe_serialize_request(
+                    lambda: session.call_tool(tool_name, arguments)
+                )
+            return await self._maybe_serialize_request(
+                lambda: session.call_tool(tool_name, arguments, meta=meta)
+            )
+
+        async def _reconnect_after_mcp_session_failure(
+            self,
+            tool_name: str,
+            error: BaseException,
+        ) -> None:
+            log_event(
+                "mcp.session.reconnect",
+                {
+                    "server": self.name,
+                    "tool": tool_name,
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                },
+                level=logging.WARNING,
+            )
+            await self.cleanup()
+            self.exit_stack = AsyncExitStack()
+            self.server_initialize_result = None
+            self.session = None
+            self._get_session_id = None
+            await self.connect()
+            log_event(
+                "mcp.session.reconnected",
+                {"server": self.name, "tool": tool_name},
+            )
+
+    return DiffbotMCPServerStreamableHttp
+
+
+def _mcp_tool_arguments(tool_name: str, arguments: dict[str, Any] | None) -> dict[str, Any] | None:
+    if tool_name != SPEAK_ASK_TOOL:
+        return arguments
+    prepared = dict(arguments or {})
+    prepared["timeoutSeconds"] = DEFAULT_ELICITATION_TIMEOUT_SECONDS
+    return prepared
+
+
+def _is_fatal_mcp_session_error(error: BaseException) -> bool:
+    from agents.mcp.server import McpError, httpx
+
+    if isinstance(error, BaseExceptionGroup):
+        return any(_is_fatal_mcp_session_error(inner) for inner in error.exceptions)
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code >= 500
+    if isinstance(
+        error,
+        (
+            ConnectionError,
+            BrokenPipeError,
+            ConnectionResetError,
+            httpx.ConnectError,
+            httpx.NetworkError,
+            httpx.RemoteProtocolError,
+        ),
+    ):
+        return True
+    if _looks_like_closed_stream_error(error):
+        return True
+    if isinstance(error, McpError):
+        code = getattr(getattr(error, "error", None), "code", None)
+        message = getattr(getattr(error, "error", None), "message", None)
+        if isinstance(code, int) and 500 <= code <= 599:
+            return True
+        return _looks_like_connection_reset_message(str(message or error))
+    return _looks_like_connection_reset_message(str(error))
+
+
+def _looks_like_closed_stream_error(error: BaseException) -> bool:
+    return type(error).__name__ in {
+        "BrokenResourceError",
+        "ClosedResourceError",
+        "EndOfStream",
+    }
+
+
+def _looks_like_connection_reset_message(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "connection reset",
+            "broken pipe",
+            "post_writer",
+            "session closed",
+            "session terminated",
+            "stream closed",
+            "closed resource",
+            "closed stream",
+            "write to closed",
+            "read from closed",
+        )
+    )
+
+
+def _raise_mcp_tool_error(server: Any, tool_name: str, error: BaseException) -> None:
+    from agents.exceptions import UserError
+    from agents.mcp.server import httpx
+
+    http_error = server._extract_http_error_from_exception(error)
+    if isinstance(http_error, httpx.HTTPStatusError):
+        status_code = http_error.response.status_code
+        raise UserError(
+            f"Failed to call tool '{tool_name}' on MCP server '{server.name}': "
+            f"HTTP error {status_code}"
+        ) from http_error
+    if isinstance(http_error, httpx.ConnectError):
+        raise UserError(
+            f"Failed to call tool '{tool_name}' on MCP server '{server.name}': Connection lost. "
+            "The server may have disconnected."
+        ) from http_error
+    if isinstance(http_error, httpx.TimeoutException):
+        raise UserError(
+            f"Failed to call tool '{tool_name}' on MCP server '{server.name}': "
+            "Connection timeout."
+        ) from http_error
+    raise error
