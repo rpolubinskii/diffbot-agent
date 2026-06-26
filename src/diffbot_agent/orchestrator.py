@@ -11,7 +11,6 @@ from diffbot_agent.agent_runtime import AgentRuntime
 from diffbot_agent.audio_client import AudioCommandClient, stdin_commands
 from diffbot_agent.config import AppConfig
 from diffbot_agent.logging_utils import log_event
-from diffbot_agent.mcp_client import DiffbotMcpClient
 from diffbot_agent.operator_input import OperatorInputCoordinator, OperatorInputRoute
 
 
@@ -19,7 +18,6 @@ from diffbot_agent.operator_input import OperatorInputCoordinator, OperatorInput
 class Orchestrator:
     config: AppConfig
     runtime: AgentRuntime
-    mcp_client: DiffbotMcpClient
     audio_client: AudioCommandClient
     input_coordinator: OperatorInputCoordinator | None = None
 
@@ -29,9 +27,8 @@ class Orchestrator:
             self.input_coordinator = OperatorInputCoordinator()
 
     async def run(self) -> None:
-        await self.mcp_client.start()
+        await self.runtime.start()
         try:
-            await self.runtime.start()
             producer = asyncio.create_task(self._produce_inputs())
             try:
                 while self.input_coordinator is not None:
@@ -43,9 +40,8 @@ class Orchestrator:
                 producer.cancel()
                 with suppress(asyncio.CancelledError):
                     await producer
-                await self.runtime.stop()
         finally:
-            await self.mcp_client.stop()
+            await self.runtime.stop()
 
     async def _produce_inputs(self) -> None:
         assert self.input_coordinator is not None
@@ -99,8 +95,7 @@ class Orchestrator:
             self._turn_running = False
 
     async def _run_command_turn(self, command: str) -> None:
-        robot_status = await self.mcp_client.read_robot_status()
-        await self.runtime.run_turn(command, robot_status)
+        await self.runtime.run_turn(command)
 
     async def _reset_context(self) -> None:
         await self.runtime.reset()
@@ -108,23 +103,8 @@ class Orchestrator:
         print("Context reset: cleared conversation history and memory.", file=sys.stderr)
 
 
-_RESET_COMMANDS = frozenset(
-    {
-        "reset context",
-        "reset the context",
-        "reset memory",
-        "reset your memory",
-        "clear context",
-        "clear the context",
-        "clear memory",
-        "clear your memory",
-        "reset session",
-        "clear session",
-        "forget everything",
-    }
-)
+RESET_COMMAND = "/reset"
 
 
 def _is_reset_command(command: str) -> bool:
-    normalized = " ".join(command.lower().split()).strip(" .!?,")
-    return normalized in _RESET_COMMANDS
+    return command.strip().lower() == RESET_COMMAND

@@ -8,10 +8,8 @@ from pathlib import Path
 
 from diffbot_agent.agent_runtime import AgentRuntime
 from diffbot_agent.audio_client import AudioCommandClient
-from diffbot_agent.memory_backend import clear_command_memories
 from diffbot_agent.config import AppConfig, ConfigError, load_config
 from diffbot_agent.logging_utils import configure_logging
-from diffbot_agent.mcp_client import DiffbotMcpClient
 from diffbot_agent.openai_agents_runtime import OpenAIAgentsRuntime
 from diffbot_agent.operator_input import OperatorInputCoordinator
 from diffbot_agent.orchestrator import Orchestrator
@@ -45,10 +43,6 @@ async def reset_session(config: AppConfig) -> None:
             result = close()
             if inspect.isawaitable(result):
                 await result
-        clear_command_memories(
-            config.agent.session_db,
-            config.agent.session_id,
-        )
 
 
 def main() -> None:
@@ -62,7 +56,7 @@ def main() -> None:
     parser.add_argument(
         "--reset-session",
         action="store_true",
-        help="Clear SDK history and canonical command memory for the active profile.",
+        help="Clear SDK conversation history for the active profile.",
     )
     args = parser.parse_args()
 
@@ -78,12 +72,10 @@ def main() -> None:
 
         input_coordinator = OperatorInputCoordinator()
         runtime = build_runtime(config, input_coordinator)
-        mcp_client = DiffbotMcpClient(config.mcp.url)
         audio_client = AudioCommandClient(config.audio)
         orchestrator = Orchestrator(
             config,
             runtime,
-            mcp_client,
             audio_client,
             input_coordinator,
         )

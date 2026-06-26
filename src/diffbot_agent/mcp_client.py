@@ -51,52 +51,6 @@ class DiffbotMcpClient:
             self._stack = None
             self._session = None
 
-    async def read_robot_status(self) -> str:
-        return await self.read_resource_text("robot://status")
-
-    async def read_resource_text(self, uri: str) -> str:
-        session = self._require_session()
-        started = monotonic_ms()
-        log_event("mcp.resource.request", {"uri": uri})
-        try:
-            result = await session.read_resource(uri)
-            raw_result = serialize_for_json(result)
-            if has_error_marker(raw_result):
-                log_event(
-                    "mcp.resource.result_error",
-                    {
-                        "uri": uri,
-                        "duration_ms": elapsed_ms(started),
-                        "raw_result": raw_result,
-                    },
-                    level=logging.WARNING,
-                )
-            text = _extract_text(result)
-            if not text:
-                raise DiffbotMcpError(f"MCP resource {uri} returned no text content.")
-            log_event(
-                "mcp.resource.response",
-                {
-                    "uri": uri,
-                    "duration_ms": elapsed_ms(started),
-                    "text": text,
-                    "raw_result": raw_result,
-                },
-            )
-            return text
-        except Exception as exc:
-            log_event(
-                "mcp.resource.error",
-                {
-                    "uri": uri,
-                    "duration_ms": elapsed_ms(started),
-                    "error_type": type(exc).__name__,
-                    "error": str(exc),
-                },
-                level=logging.ERROR,
-            )
-            raise
-
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         session = self._require_session()
         started = monotonic_ms()
@@ -130,33 +84,3 @@ class DiffbotMcpClient:
         if self._session is None:
             raise DiffbotMcpError("MCP client has not been started.")
         return self._session
-
-
-def _extract_text(value: Any) -> str:
-    parts: list[str] = []
-    _collect_text(value, parts)
-    return "\n".join(part for part in parts if part).strip()
-
-
-def _collect_text(value: Any, parts: list[str]) -> None:
-    if value is None:
-        return
-    if isinstance(value, str):
-        parts.append(value)
-        return
-    if isinstance(value, bytes):
-        parts.append(value.decode("utf-8", errors="replace"))
-        return
-    if isinstance(value, dict):
-        for key in ("text", "content", "contents", "messages", "data"):
-            if key in value:
-                _collect_text(value[key], parts)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _collect_text(item, parts)
-        return
-
-    for attr in ("text", "content", "contents", "messages", "data"):
-        if hasattr(value, attr):
-            _collect_text(getattr(value, attr), parts)

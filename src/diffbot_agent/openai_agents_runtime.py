@@ -3,26 +3,23 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from diffbot_agent.context_window import CommandContextState, compose_command_input
 from diffbot_agent.elicitation import ElicitationAnswerProvider, build_elicitation_callback
 from diffbot_agent.episode import (
     build_canonical_record,
     set_mcp_tool_categories,
-    set_tool_category_overrides,
     utc_now,
 )
 from diffbot_agent.memory_backend import (
     DiffbotMcpMemoryBackend,
     MemoryBackend,
     NullMemoryBackend,
-    SqliteRecencyBackend,
 )
 from diffbot_agent.mcp_logging import McpRunLogger
 from diffbot_agent.sanitize import sanitize_session_items
@@ -36,7 +33,11 @@ from diffbot_agent.logging_utils import (
 
 INSTRUCTIONS = """You are a differential long-running robot control agent.
 
-Use speak tool as the main way to communicate with the user. Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory.
+Use the speak tool as the main way to communicate with the user. Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory.
+
+The conversation history is your short-term memory. Observations in it (camera frames, descriptions of what you saw) are timestamped and describe the past, not necessarily the present. Robot status is NOT provided automatically. To establish the CURRENT state of the world — what is visible now, where the robot is now — capture a fresh camera frame or call a status tool (robot.get_status for a full snapshot, or nav.get_pose / nav.get_imu). Never treat an earlier observation as proof of what is in front of you now.
+
+Use memory.recall to look up durable facts you may have learned earlier or in past sessions (locations, people, named objects, past outcomes) when they are relevant to the current command. Use memory.remember to store a durable fact worth keeping beyond this session. Recalled facts are historical hints: verify anything about current visibility or position with a fresh observation.
 """
 
 MCP_CLIENT_SESSION_TIMEOUT_SECONDS = 90
@@ -61,7 +62,6 @@ class OpenAIAgentsRuntime:
 
     async def start(self) -> None:
         profile = self.config.agent
-        set_tool_category_overrides(self.config.tool_categories)
         if profile.backend == "openai" and not profile.openai_api_key.strip():
             raise ConfigError(f"[agents.{profile.name}].openai_api_key is required for OpenAI.")
         if profile.backend == "ollama" and (
@@ -70,7 +70,7 @@ class OpenAIAgentsRuntime:
             raise ConfigError(f"[agents.{profile.name}] requires model and base_url for Ollama.")
 
         from agents import Agent, SQLiteSession
-        from agents import set_default_openai_key
+        from agents import set_default_openai_key, set_tracing_disabled
         from agents.mcp import MCPServerStreamableHttp
         from agents.model_settings import ModelSettings
 
@@ -80,6 +80,9 @@ class OpenAIAgentsRuntime:
         elif profile.backend == "ollama":
             from diffbot_agent.ollama_vision_provider import OllamaVisionProvider
 
+            # No OpenAI key on the local path; disable SDK tracing so it stops
+            # trying (and logging failures) to export traces to OpenAI's platform.
+            set_tracing_disabled(True)
             self._model_provider = OllamaVisionProvider(
                 api_key=profile.api_key or "ollama",
                 base_url=profile.base_url,
@@ -159,7 +162,7 @@ class OpenAIAgentsRuntime:
             await stack.aclose()
             raise
 
-    async def run_turn(self, command: str, robot_status: str) -> None:
+    async def run_turn(self, command: str) -> None:
         if (
             self._agent is None
             or self._session is None
@@ -170,29 +173,12 @@ class OpenAIAgentsRuntime:
         from agents import RunConfig, Runner
 
         started_at = utc_now()
-        started_monotonic = time.monotonic()
-        historical_memory = await self._memory.recall(
-            query=command,
-            limit=self.config.agent_runtime.history_commands,
-            now=datetime.fromisoformat(started_at),
-        )
-        turn_text = compose_command_input(
-            command,
-            robot_status,
-            historical_memory,
-            started_at=started_at,
-        )
+        turn_text = compose_command_input(command, started_at=started_at)
         command_state = CommandContextState(
-            full_tool_rounds=self.config.agent_runtime.full_tool_rounds,
-            command=command,
-            robot_status=robot_status,
-            historical_memory=historical_memory,
+            max_context_items=self.config.agent_runtime.max_context_items,
             compact_locally=self._compact_locally,
-            started_at=started_at,
-            started_monotonic=started_monotonic,
         )
         run_config_kwargs: dict[str, Any] = {
-            "session_input_callback": _exclude_session_history,
             "call_model_input_filter": command_state.filter_model_input,
             "trace_include_sensitive_data": False,
         }
@@ -283,8 +269,6 @@ class OpenAIAgentsRuntime:
 def _build_memory_backend(config: AppConfig) -> MemoryBackend:
     if config.memory.backend == "diffbot_memory":
         return DiffbotMcpMemoryBackend(config.mcp.url)
-    if config.memory.backend == "sqlite":
-        return SqliteRecencyBackend(config.agent.session_db, config.agent.session_id)
     return NullMemoryBackend()
 
 
@@ -397,14 +381,6 @@ def _image_sanitizing_session_class(base_class: type[Any]) -> type[Any]:
             await super().add_items(sanitize_session_items(items))
 
     return ImageSanitizingSQLiteSession
-
-
-def _exclude_session_history(
-    history_items: list[Any],
-    new_items: list[Any],
-) -> list[Any]:
-    del history_items
-    return new_items
 
 
 def _result_input_items(result: Any) -> list[Any]:

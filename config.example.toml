@@ -6,26 +6,19 @@ level = "info"
 [agent_runtime]
 busy_policy = "ignore"
 max_turns = 1000
-# How many recent canonical command records the memory backend recalls per turn.
-history_commands = 10000000
-# OpenAI path: the Responses API compacts in-command context server-side once it
-# crosses this token threshold. Ollama has no server compaction and instead keeps
-# the latest `full_tool_rounds` tool rounds exact, compacting older ones locally.
+# OpenAI path: the Responses API compacts the context server-side once it crosses
+# this token threshold.
 compact_threshold = 240000
-full_tool_rounds = 10000000
+# Ollama path only (no server compaction): cap the retained conversation thread to
+# the most recent N items, dropping older turns. Ignored on the OpenAI path.
+max_context_items = 40
 
 [memory]
-# Cross-command memory backend:
-#   "sqlite"         local recency-based records (default, offline)
-#   "diffbot_memory" persistent Graphiti memory via diffbot-mcp's memory.* tools
-#   "none"           disabled
-backend = "sqlite"
-
-# Optional: override the category diffbot-mcp advertises for a tool (it normally
-# provides categories via each tool's MCP _meta). Categories: speech, navigation,
-# safety, status, vision, tool. Use the bare operation name (after the "server__" prefix).
-# [tool_categories]
-# patrol_route = "navigation"
+# Cross-command memory backend. Recall is deliberate (the model calls diffbot-mcp's
+# memory.recall tool itself); a backend only persists episodes after each command.
+#   "none"           disabled (default)
+#   "diffbot_memory" persistent Graphiti memory via diffbot-mcp's memory.remember tool
+backend = "none"
 
 [agents.openai-main]
 backend = "openai"
