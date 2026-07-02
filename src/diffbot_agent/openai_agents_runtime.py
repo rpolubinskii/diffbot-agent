@@ -27,7 +27,7 @@ from diffbot_agent.memory_backend import (
 )
 from diffbot_agent.mcp_logging import McpRunLogger
 from diffbot_agent.sanitize import sanitize_session_items
-from diffbot_agent.config import AppConfig, ConfigError
+from diffbot_agent.config import AgentProfileConfig, AgentRuntimeConfig, AppConfig, ConfigError
 from diffbot_agent.logging_utils import (
     log_event,
     log_by_verbosity,
@@ -37,11 +37,7 @@ from diffbot_agent.logging_utils import (
 
 INSTRUCTIONS = """You are a differential long-running robot control agent.
 
-Use the speak tool as the main way to communicate with the user. Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory.
-
-The conversation history is your short-term memory. Observations in it (camera frames, descriptions of what you saw) are timestamped and describe the past, not necessarily the present. Robot status is NOT provided automatically. To establish the CURRENT state of the world — what is visible now, where the robot is now — capture a fresh camera frame or call a status tool (robot.get_status for a full snapshot, or nav.get_pose / nav.get_imu). Never treat an earlier observation as proof of what is in front of you now.
-
-Use memory.recall to look up durable facts you may have learned earlier or in past sessions (locations, people, named objects, past outcomes) when they are relevant to the current command. Use memory.remember to store a durable fact worth keeping beyond this session. Recalled facts are historical hints: verify anything about current visibility or position with a fresh observation.
+The operator CANNOT see your text output — plain-text replies are discarded logs. The speak.say tool is your ONLY channel to the user. Act and use tools silently while carrying out tasks; you don't need to narrate every step. But whenever you want to answer the user or tell them something, you MUST say it with speak.say — a plain-text reply will never reach them. Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory.
 """
 
 MCP_CLIENT_SESSION_TIMEOUT_SECONDS = 90
@@ -56,6 +52,7 @@ MCP_SAFE_RETRY_TOOLS = frozenset(
     }
 )
 SPEAK_ASK_TOOL = "speak.ask"
+OLLAMA_REASONING_EFFORT = "max"
 
 # Contract with diffbot-mcp ToolCategoryMeta.CATEGORY_KEY — keep in sync.
 TOOL_CATEGORY_META_KEY = "diffbot.dev/category"
@@ -86,7 +83,6 @@ class OpenAIAgentsRuntime:
         from agents import Agent, SQLiteSession
         from agents import set_default_openai_key, set_tracing_disabled
         from agents.mcp import MCPServerStreamableHttp
-        from agents.model_settings import ModelSettings
 
         if profile.backend == "openai":
             set_default_openai_key(profile.openai_api_key)
@@ -107,16 +103,7 @@ class OpenAIAgentsRuntime:
 
         # Ollama has no server-side compaction; it compacts tool rounds locally.
         self._compact_locally = profile.backend != "openai"
-        model_settings = ModelSettings()
-        if profile.backend == "openai" and self.config.agent_runtime.compact_threshold > 0:
-            model_settings = ModelSettings(
-                context_management=[
-                    {
-                        "type": "compaction",
-                        "compact_threshold": self.config.agent_runtime.compact_threshold,
-                    }
-                ]
-            )
+        model_settings = _model_settings_for_profile(profile, self.config.agent_runtime)
         elicitation_callback = build_elicitation_callback(
             self.elicitation_answer_provider or _cancel_elicitation
         )
@@ -284,6 +271,29 @@ def _build_memory_backend(config: AppConfig) -> MemoryBackend:
     if config.memory.backend == "diffbot_memory":
         return DiffbotMcpMemoryBackend(config.mcp.url)
     return NullMemoryBackend()
+
+
+def _model_settings_for_profile(
+    profile: AgentProfileConfig,
+    runtime_config: AgentRuntimeConfig,
+) -> Any:
+    from agents.model_settings import ModelSettings
+
+    if profile.backend == "ollama":
+        # Ollama accepts max; the OpenAI SDK's typed Reasoning.effort does not.
+        return ModelSettings(extra_body={"reasoning_effort": OLLAMA_REASONING_EFFORT})
+
+    if profile.backend == "openai" and runtime_config.compact_threshold > 0:
+        return ModelSettings(
+            context_management=[
+                {
+                    "type": "compaction",
+                    "compact_threshold": runtime_config.compact_threshold,
+                }
+            ]
+        )
+
+    return ModelSettings()
 
 
 async def _cancel_elicitation(timeout_seconds: float) -> str | None:
