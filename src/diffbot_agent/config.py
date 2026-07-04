@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from diffbot_agent.session_usage import DEFAULT_MODEL_PRICES, ModelPricing
 
 
 class ConfigError(ValueError):
@@ -26,7 +28,7 @@ class AgentProfileConfig:
 class AgentRuntimeConfig:
     busy_policy: str
     max_turns: int
-    max_context_items: int = 40
+    max_context_tokens: int = 32000
     compact_threshold: int = 240000
 
 
@@ -63,6 +65,7 @@ class AppConfig:
     mcp: McpConfig
     audio: AudioConfig
     logging: LoggingConfig
+    pricing: dict[str, ModelPricing] = field(default_factory=dict)
 
 
 def load_config(path: Path) -> AppConfig:
@@ -94,6 +97,7 @@ def load_config(path: Path) -> AppConfig:
             reconnect_delay_seconds=_number(audio, "reconnect_delay_seconds", 2.0),
         ),
         logging=LoggingConfig(level=_logging_level(logging_config)),
+        pricing=_load_pricing(data),
     )
 
 
@@ -139,7 +143,7 @@ def _legacy_agent_config(
     runtime_config = AgentRuntimeConfig(
         busy_policy=_string(agent, "busy_policy", "ignore"),
         max_turns=_positive_integer(agent, "max_turns", 50),
-        max_context_items=_non_negative_integer(agent, "max_context_items", 40),
+        max_context_tokens=_non_negative_integer(agent, "max_context_tokens", 32000),
         compact_threshold=_positive_integer(agent, "compact_threshold", 240000),
     )
     _validate_runtime_config(runtime_config)
@@ -173,7 +177,7 @@ def _runtime_config(data: dict[str, Any]) -> AgentRuntimeConfig:
     config = AgentRuntimeConfig(
         busy_policy=_string(data, "busy_policy", "ignore"),
         max_turns=_positive_integer(data, "max_turns", 50),
-        max_context_items=_non_negative_integer(data, "max_context_items", 40),
+        max_context_tokens=_non_negative_integer(data, "max_context_tokens", 32000),
         compact_threshold=_positive_integer(data, "compact_threshold", 240000),
     )
     _validate_runtime_config(config)
@@ -266,6 +270,18 @@ def _logging_level(data: dict[str, Any]) -> str:
     if level not in {"info", "debug"}:
         raise ConfigError('logging level must be "info" or "debug".')
     return level
+
+
+def _load_pricing(data: dict[str, Any]) -> dict[str, ModelPricing]:
+    prices = dict(DEFAULT_MODEL_PRICES)
+    for model, value in _table(data, "pricing").items():
+        if not isinstance(value, dict):
+            raise ConfigError(f'[pricing."{model}"] must be a TOML table.')
+        prices[model] = ModelPricing(
+            input_per_mtok=_number(value, "input_per_mtok", 0.0),
+            output_per_mtok=_number(value, "output_per_mtok", 0.0),
+        )
+    return prices
 
 
 def _memory_backend(data: dict[str, Any]) -> str:

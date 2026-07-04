@@ -9,9 +9,10 @@ max_turns = 1000
 # OpenAI path: the Responses API compacts the context server-side once it crosses
 # this token threshold.
 compact_threshold = 240000
-# Ollama path only (no server compaction): cap the retained conversation thread to
-# the most recent N items, dropping older turns. Ignored on the OpenAI path.
-max_context_items = 40
+# Ollama path only (no server compaction): bound the retained conversation thread to
+# roughly this many tokens (estimated, ~chars/4), dropping older turns. Also the
+# reference for the console 'ctx' gauge on the local path. Ignored on the OpenAI path.
+max_context_tokens = 32000
 
 [memory]
 # Cross-command memory backend. Recall is deliberate (the model calls diffbot-mcp's
@@ -35,6 +36,10 @@ base_url = ""
 session_id = "diffbot-ollama"
 session_db = "diffbot-agent.sqlite3"
 api_key = "ollama"
+
+[pricing."gpt-5.5"]
+input_per_mtok = 5.00
+output_per_mtok = 30.0
 
 [mcp]
 url = "http://localhost:8080/mcp"

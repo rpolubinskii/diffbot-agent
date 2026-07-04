@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from diffbot_agent.session_usage import SessionUsage
+
 
 class AgentRuntime(Protocol):
+    usage: SessionUsage
+    """Live token/cost totals for the session, updated as turns run."""
+
     async def start(self) -> None:
         """Initialize the runtime and its long-lived session."""
 

@@ -6,6 +6,7 @@ import sys
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 
 from diffbot_agent.agent_runtime import AgentRuntime
 from diffbot_agent.audio_client import AudioCommandClient, stdin_commands
@@ -65,7 +66,8 @@ class Orchestrator:
                 yield command
         else:
             print("Voice command stream disabled; using manual stdin commands.", file=sys.stderr)
-            async for command in stdin_commands():
+            history_path = Path(self.config.agent.session_db).with_suffix(".history")
+            async for command in stdin_commands(self.runtime.usage, history_path=history_path):
                 yield command
 
     async def _accept_command(self, command: str) -> None:

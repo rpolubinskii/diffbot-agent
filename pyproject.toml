@@ -9,6 +9,7 @@ dependencies = [
     "mcp>=1.21.0",
     # Pinned exactly: we depend on Agents SDK internals (guarded by tests).
     "openai-agents==0.17.4",
+    "prompt-toolkit>=3.0",
     "protobuf>=4.25.0",
 ]
 

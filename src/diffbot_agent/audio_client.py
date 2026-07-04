@@ -3,14 +3,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import grpc
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.history import FileHistory, InMemoryHistory
+from prompt_toolkit.patch_stdout import patch_stdout
 
 from diffbot_agent.config import AudioConfig
-from diffbot_agent.logging_utils import log_event
+from diffbot_agent.logging_utils import LOGGER_NAME, log_event
 from diffbot_agent.proto import audio_pb2
+from diffbot_agent.session_usage import SessionUsage
 
 
 _STREAM_VOICE_COMMANDS_METHOD = "/diffbot.audio.v1.AudioService/StreamVoiceCommands"
@@ -75,15 +82,67 @@ class AudioCommandClient:
             await asyncio.sleep(self.config.reconnect_delay_seconds)
 
 
-async def stdin_commands(prompt: str = "diffbot> ") -> AsyncIterator[str]:
-    while True:
+SLASH_COMMANDS = ("/help", "/tokens", "/reset", "/quit")
+_HELP_TEXT = (
+    "Commands: /tokens (usage breakdown) · /reset (clear context + counters) · "
+    "/help · /quit (or exit). ↑/↓ recall history. Anything else is sent to the agent."
+)
+
+
+def _build_prompt_session(history_path: Path | None) -> PromptSession[str]:
+    history = FileHistory(str(history_path)) if history_path is not None else InMemoryHistory()
+    completer = WordCompleter([*SLASH_COMMANDS, "exit", "quit"], sentence=True)
+    return PromptSession(history=history, completer=completer)
+
+
+@contextmanager
+def _console_output() -> Iterator[None]:
+    """Redraw async logs/prints above the live prompt instead of smearing it.
+
+    ``patch_stdout`` swaps ``sys.stdout``/``sys.stderr`` for proxies that reprint
+    the prompt after each write. The logging handler bound its stream at startup,
+    so re-point it at the (now proxied) stderr for the duration of the session.
+    """
+    with patch_stdout():
+        logger = logging.getLogger(LOGGER_NAME)
+        restored = [
+            (handler, handler.setStream(sys.stderr))
+            for handler in logger.handlers
+            if isinstance(handler, logging.StreamHandler)
+            and not isinstance(handler, logging.FileHandler)
+        ]
         try:
-            line = await asyncio.to_thread(input, prompt)
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            break
-        command = line.strip()
-        if command.lower() in {"exit", "quit"}:
-            break
-        if command:
-            yield command
+            yield
+        finally:
+            for handler, previous in restored:
+                if previous is not None:
+                    handler.setStream(previous)
+
+
+async def stdin_commands(
+    usage: SessionUsage,
+    *,
+    history_path: Path | None = None,
+    prompt: str = "diffbot> ",
+) -> AsyncIterator[str]:
+    session = _build_prompt_session(history_path)
+    with _console_output():
+        while True:
+            try:
+                line = await session.prompt_async(
+                    prompt, bottom_toolbar=lambda: usage.toolbar_text()
+                )
+            except (EOFError, KeyboardInterrupt):
+                break
+            command = line.strip()
+            lowered = command.lower()
+            if lowered in {"exit", "quit", "/quit"}:
+                break
+            if lowered == "/help":
+                print(_HELP_TEXT)
+                continue
+            if lowered == "/tokens":
+                print(usage.breakdown())
+                continue
+            if command:
+                yield command

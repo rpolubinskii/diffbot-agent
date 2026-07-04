@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -24,11 +25,11 @@ SERVER_COMPACTION_TYPE = "compaction"
 @dataclass
 class CommandContextState:
     """Per-turn input shaping. Two robot-specific jobs only: keep the model's
-    context to the latest valid camera frame, and bound the length of the retained
-    conversation thread on the local (Ollama) path. The thread itself is owned by
-    the SDK session; this no longer rebuilds it."""
+    context to the latest valid camera frame, and bound the retained conversation
+    thread to a token budget on the local (Ollama) path. The thread itself is owned
+    by the SDK session; this no longer rebuilds it."""
 
-    max_context_items: int
+    max_context_tokens: int
     compact_locally: bool = True
     completed_call_ids: set[str] = field(default_factory=set)
     image_call_ids: set[str] = field(default_factory=set)
@@ -42,7 +43,7 @@ class CommandContextState:
         current_items = payload.model_data.input
         self._update_visual_state(current_items)
         if self.compact_locally:
-            bounded = trim_to_recent(current_items, self.max_context_items)
+            bounded = trim_to_token_budget(current_items, self.max_context_tokens)
         else:
             bounded = truncate_at_server_compaction(current_items)
         bounded = self._restore_current_image(bounded)
@@ -97,19 +98,48 @@ def compose_command_input(command: str, *, started_at: str | None = None) -> str
     return f"{stamp} {command}"
 
 
-def trim_to_recent(items: list[Any], max_items: int) -> list[Any]:
+IMAGE_TOKEN_ESTIMATE = 1000
+_CHARS_PER_TOKEN = 4
+
+
+def trim_to_token_budget(items: list[Any], max_tokens: int) -> list[Any]:
     """Bound the retained thread on the local path (Ollama has no server-side
-    compaction). Keep any leading system/developer preamble plus the most recent
-    ``max_items`` body items, then repair the cut so no tool call/output is orphaned.
-    Older turns are dropped, not summarized — durable facts live in diffbot-memory."""
+    compaction). Keep any leading system/developer preamble plus the most recent body
+    items whose estimated tokens fit ``max_tokens`` (always at least one), then repair
+    the cut so no tool call/output is orphaned. Older turns are dropped, not summarized
+    — durable facts live in diffbot-memory. ``max_tokens <= 0`` disables the bound.
+
+    The token count is a heuristic (``chars/4``, images charged a flat cost), so the
+    real context can modestly exceed the budget once the preamble and tool schemas are
+    added by the SDK."""
     copied = copy.deepcopy(items)
-    if max_items <= 0:
+    if max_tokens <= 0:
         return copied
     head_end = _preamble_end(copied)
     body = copied[head_end:]
-    if len(body) <= max_items:
+    kept: list[Any] = []
+    total = 0
+    for item in reversed(body):
+        total += _estimate_tokens(item)
+        if total > max_tokens and kept:
+            break
+        kept.append(item)
+    if len(kept) == len(body):
         return copied
-    return copied[:head_end] + _repair_tool_pairing(body[-max_items:])
+    kept.reverse()
+    return copied[:head_end] + _repair_tool_pairing(kept)
+
+
+def _estimate_tokens(item: Any) -> int:
+    """Rough token estimate for one thread item. Images are charged a flat cost so a
+    base64 blob doesn't crowd out the rest of the thread; everything else is ~chars/4."""
+    if isinstance(item, dict) and contains_image(item.get("output")):
+        return IMAGE_TOKEN_ESTIMATE
+    try:
+        text = json.dumps(item, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = str(item)
+    return max(1, len(text) // _CHARS_PER_TOKEN)
 
 
 def truncate_at_server_compaction(items: list[Any]) -> list[Any]:

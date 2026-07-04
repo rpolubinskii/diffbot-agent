@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import sys
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -28,6 +29,7 @@ from diffbot_agent.memory_backend import (
 from diffbot_agent.mcp_logging import McpRunLogger
 from diffbot_agent.sanitize import sanitize_session_items
 from diffbot_agent.config import AgentProfileConfig, AgentRuntimeConfig, AppConfig, ConfigError
+from diffbot_agent.session_usage import SessionUsage
 from diffbot_agent.logging_utils import (
     log_event,
     log_by_verbosity,
@@ -70,6 +72,17 @@ class OpenAIAgentsRuntime:
         self._model_provider = None
         self._memory: MemoryBackend | None = None
         self._compact_locally = True
+        # Local models are free; never price them against the OpenAI table.
+        backend = self.config.agent.backend
+        prices = {} if backend == "ollama" else self.config.pricing
+        # Context gauge reference: OpenAI compacts server-side at compact_threshold;
+        # the local path bounds the thread to max_context_tokens (reuse it as the gauge).
+        if backend == "openai":
+            threshold = self.config.agent_runtime.compact_threshold
+            context_limit = threshold if threshold > 0 else None
+        else:
+            context_limit = self.config.agent_runtime.max_context_tokens or None
+        self.usage = SessionUsage(self.config.agent.model, prices, context_limit=context_limit)
 
     async def start(self) -> None:
         profile = self.config.agent
@@ -176,7 +189,7 @@ class OpenAIAgentsRuntime:
         started_at = utc_now()
         turn_text = compose_command_input(command, started_at=started_at)
         command_state = CommandContextState(
-            max_context_items=self.config.agent_runtime.max_context_items,
+            max_context_tokens=self.config.agent_runtime.max_context_tokens,
             compact_locally=self._compact_locally,
         )
         run_config_kwargs: dict[str, Any] = {
@@ -186,7 +199,8 @@ class OpenAIAgentsRuntime:
         if self._model_provider is not None:
             run_config_kwargs["model_provider"] = self._model_provider
         run_config = RunConfig(**run_config_kwargs)
-        run_hooks = _build_run_hooks(self.config, command_state)
+        run_hooks = _build_run_hooks(self.config, command_state, self.usage)
+        usage_before = self.usage.snapshot()
         mcp_logger = McpRunLogger()
         result = Runner.run_streamed(
             self._agent,
@@ -238,8 +252,10 @@ class OpenAIAgentsRuntime:
                 final_output=getattr(result, "final_output", None),
             )
         )
+        print(self.usage.turn_summary(self.usage.delta_since(usage_before)), file=sys.stderr)
 
     async def reset(self) -> None:
+        self.usage.reset()
         if self._session is not None:
             clear = getattr(self._session, "clear_session", None)
             if callable(clear):
@@ -281,7 +297,13 @@ def _model_settings_for_profile(
 
     if profile.backend == "ollama":
         # Ollama accepts max; the OpenAI SDK's typed Reasoning.effort does not.
-        return ModelSettings(extra_body={"reasoning_effort": OLLAMA_REASONING_EFFORT})
+        # include_usage requests stream_options usage, which the SDK otherwise
+        # only defaults on for the official OpenAI client (token counter reads 0
+        # without it on the chat-completions streaming path).
+        return ModelSettings(
+            include_usage=True,
+            extra_body={"reasoning_effort": OLLAMA_REASONING_EFFORT},
+        )
 
     if profile.backend == "openai" and runtime_config.compact_threshold > 0:
         return ModelSettings(
@@ -327,6 +349,7 @@ async def _load_mcp_tool_categories(mcp_server: Any) -> None:
 def _build_run_hooks(
     config: AppConfig,
     command_state: CommandContextState,
+    session_usage: SessionUsage,
 ) -> Any:
     from agents.lifecycle import RunHooksBase
 
@@ -352,6 +375,7 @@ def _build_run_hooks(
 
         async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
             command_state.mark_model_request_succeeded()
+            session_usage.add(getattr(response, "usage", None))
             reasoning = _reasoning_texts(response)
             log_by_verbosity(
                 debug_event="llm.response",
