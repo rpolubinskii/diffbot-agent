@@ -10,6 +10,7 @@ from typing import Any
 
 from datetime import timedelta
 
+from diffbot_agent.agent_runtime import TurnResult
 from diffbot_agent.context_window import CommandContextState, compose_command_input
 from diffbot_agent.elicitation import (
     DEFAULT_ELICITATION_TIMEOUT_SECONDS,
@@ -176,7 +177,7 @@ class OpenAIAgentsRuntime:
             await stack.aclose()
             raise
 
-    async def run_turn(self, command: str) -> None:
+    async def run_turn(self, command: str) -> TurnResult:
         if (
             self._agent is None
             or self._session is None
@@ -241,18 +242,24 @@ class OpenAIAgentsRuntime:
             raise
 
         completed_at = utc_now()
-        await self._memory.add_episode(
-            build_canonical_record(
-                session_id=self.config.agent.session_id,
-                started_at=started_at,
-                completed_at=completed_at,
-                command=command,
-                completion_status="completed",
-                items=_result_input_items(result),
-                final_output=getattr(result, "final_output", None),
-            )
+        record = build_canonical_record(
+            session_id=self.config.agent.session_id,
+            started_at=started_at,
+            completed_at=completed_at,
+            command=command,
+            completion_status="completed",
+            items=_result_input_items(result),
+            final_output=getattr(result, "final_output", None),
         )
+        await self._memory.add_episode(record)
         print(self.usage.turn_summary(self.usage.delta_since(usage_before)), file=sys.stderr)
+        return TurnResult(
+            status="completed",
+            final_text=record.final_assistant_text,
+            started_at=record.started_at,
+            completed_at=record.completed_at,
+            tool_events=record.tool_events,
+        )
 
     async def reset(self) -> None:
         self.usage.reset()

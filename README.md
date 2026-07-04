@@ -163,3 +163,46 @@ the process starts. Typing `/reset` during a session does the same without a res
 (the persistent memory graph is not wiped). It is handled between turns — like any
 command, a `/reset` sent while a turn is running is ignored under `busy_policy = "ignore"`.
 The orchestrator does not start a new agent process per command.
+
+## Agent Interop Server
+
+Coding agents can delegate robot-facing requests to the same long-running
+`diffbot-agent` runtime instead of calling `diffbot-mcp` directly:
+
+```bash
+uv run diffbot-agent serve --config config.toml --host 127.0.0.1 --port 8090
+```
+
+The server exposes:
+
+- A2A JSON-RPC at `http://127.0.0.1:8090/`.
+- The A2A agent card at `http://127.0.0.1:8090/.well-known/agent-card.json`.
+- Streamable HTTP MCP at `http://127.0.0.1:8090/mcp`.
+- Health/status at `http://127.0.0.1:8090/health`.
+
+For Codex, add the MCP endpoint in a trusted project `.codex/config.toml` or
+the global Codex config:
+
+```toml
+[mcp_servers.diffbot_agent]
+url = "http://127.0.0.1:8090/mcp"
+required = false
+tool_timeout_sec = 600
+```
+
+For Claude Code:
+
+```bash
+claude mcp add --transport http diffbot-agent http://127.0.0.1:8090/mcp
+```
+
+The main MCP tool is:
+
+```text
+diffbot_agent.run_command(command, timeout_seconds=600)
+```
+
+It sends one command through the existing DiffBot agent session and returns the
+final textual result plus bounded structured metadata. `diffbot_agent.status`
+reports server/session state, and `diffbot_agent.reset_session` clears the
+conversation session.

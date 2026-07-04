@@ -47,6 +47,30 @@ async def reset_session(config: AppConfig) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the DiffBot agent orchestrator.")
+    subparsers = parser.add_subparsers(dest="command")
+    serve_parser = subparsers.add_parser("serve", help="Run the local A2A/MCP server.")
+    serve_parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Host interface for the local server.",
+    )
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=8090,
+        help="Port for the local server.",
+    )
+    serve_parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path("config.toml"),
+        help="Path to config.toml.",
+    )
+    serve_parser.add_argument(
+        "--reset-session",
+        action="store_true",
+        help="Clear SDK conversation history before serving.",
+    )
     parser.add_argument(
         "--config",
         type=Path,
@@ -68,6 +92,18 @@ def main() -> None:
             print(
                 f'Reset session "{config.agent.session_id}" in {config.agent.session_db}.'
             )
+            if args.command != "serve":
+                return
+
+        if args.command == "serve":
+            import uvicorn
+
+            from diffbot_agent.server import create_app
+
+            input_coordinator = OperatorInputCoordinator()
+            runtime = build_runtime(config, input_coordinator)
+            app = create_app(runtime, host=args.host, port=args.port)
+            uvicorn.run(app, host=args.host, port=args.port)
             return
 
         input_coordinator = OperatorInputCoordinator()

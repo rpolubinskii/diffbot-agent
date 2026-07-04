@@ -5,12 +5,14 @@ description = "Long-running DiffBot command orchestrator"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "a2a-sdk[http-server]>=0.3.0",
     "grpcio>=1.62.0",
     "mcp>=1.21.0",
     # Pinned exactly: we depend on Agents SDK internals (guarded by tests).
     "openai-agents==0.17.4",
     "prompt-toolkit>=3.0",
     "protobuf>=4.25.0",
+    "uvicorn>=0.48.0",
 ]
 
 [project.scripts]
