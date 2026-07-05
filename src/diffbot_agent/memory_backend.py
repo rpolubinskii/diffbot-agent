@@ -5,7 +5,7 @@ import json
 import logging
 from typing import Protocol, runtime_checkable
 
-from diffbot_agent.episode import CanonicalCommandRecord
+from diffbot_agent.episode import CanonicalCommandRecord, build_memory_episode_draft
 from diffbot_agent.logging_utils import log_event
 from diffbot_agent.mcp_client import DiffbotMcpClient
 
@@ -65,14 +65,20 @@ class DiffbotMcpMemoryBackend:
     async def add_episode(self, record: CanonicalCommandRecord) -> None:
         if not self._connected:
             return
-        content = json.dumps(record.compact_dict(), ensure_ascii=False)
+        draft = build_memory_episode_draft(record)
+        if draft is None:
+            return
+        content = json.dumps(draft, ensure_ascii=False, separators=(",", ":"))
         task = asyncio.create_task(self._remember(content))
         self._pending.add(task)
         task.add_done_callback(self._pending.discard)
 
     async def _remember(self, content: str) -> None:
         try:
-            await self._client.call_tool("memory.remember", {"content": content})
+            await self._client.call_tool(
+                "memory.remember",
+                {"content": content, "type": "json"},
+            )
         except Exception as exc:
             log_event(
                 "memory.remember.error",

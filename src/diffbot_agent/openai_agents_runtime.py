@@ -40,7 +40,7 @@ from diffbot_agent.logging_utils import (
 
 INSTRUCTIONS = """You are a differential long-running robot control agent.
 
-The operator CANNOT see your text output — plain-text replies are discarded logs. The speak.say tool is your ONLY channel to the user. Act and use tools silently while carrying out tasks; you don't need to narrate every step. But whenever you want to answer the user or tell them something, you MUST say it with speak.say — a plain-text reply will never reach them. Use diffbot-mcp tools for robot state, navigation, vision, speech, and memory.
+The operator CANNOT see your text output — plain-text replies are discarded logs. The speak.say tool is your ONLY channel to communicate with the user.
 """
 
 MCP_CLIENT_SESSION_TIMEOUT_SECONDS = 90

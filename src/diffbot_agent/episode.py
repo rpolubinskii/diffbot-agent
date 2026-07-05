@@ -15,6 +15,7 @@ from diffbot_agent.sanitize import (
 
 
 UNKNOWN_OUTPUT_PREVIEW_CHARS = 500
+MEMORY_TEXT_CHARS = 2000
 
 # Conversation-item types for tool turns in the OpenAI Agents SDK transcript. This is
 # coupling to the model/SDK item format (not to diffbot-mcp): the agent must tell a
@@ -25,6 +26,15 @@ _OUTPUT_TYPES = {"function_call_output"}
 # Tool categories are owned by diffbot-mcp (advertised in each tool's _meta) and
 # loaded once at startup. The agent never classifies tools itself.
 _MCP_TOOL_CATEGORIES: dict[str, str] = {}
+
+_MEMORY_DRAFT_TOOL_OUTPUT_CHARS = 500
+_MEMORY_DRAFT_TOOL_CATEGORIES_TO_SKIP = {"speech", "status"}
+_NOISE_TOOL_NAMES = {
+    "memory_recall",
+    "memory_remember",
+    "system_wait",
+    "diffbot_debug_enabled",
+}
 
 
 def set_mcp_tool_categories(mapping: dict[str, str]) -> None:
@@ -97,6 +107,24 @@ def build_canonical_record(
     )
 
 
+def build_memory_episode_draft(record: CanonicalCommandRecord) -> dict[str, Any] | None:
+    draft: dict[str, Any] = {
+        "started_at": record.started_at,
+        "completed_at": record.completed_at,
+        "command": _bounded_text(record.command.strip(), MEMORY_TEXT_CHARS),
+        "completion_status": record.completion_status,
+        "final_assistant_text": _bounded_text(
+            record.final_assistant_text.strip(),
+            MEMORY_TEXT_CHARS,
+        ),
+        "tool_events": _memory_draft_tool_events(record.tool_events),
+    }
+    compact = {key: value for key, value in draft.items() if value not in ("", [], {}, None)}
+    if not any(key in compact for key in ("command", "final_assistant_text", "tool_events")):
+        return None
+    return compact
+
+
 def compact_tool_event(
     call: dict[str, Any],
     output: dict[str, Any] | None,
@@ -118,6 +146,42 @@ def compact_tool_event(
     if preview:
         event["output"] = preview
     return event
+
+
+def _memory_draft_tool_events(events: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for event in events:
+        tool_event = _memory_draft_tool_event(event)
+        if tool_event is not None:
+            result.append(tool_event)
+    return result
+
+
+def _memory_draft_tool_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    tool_name = _normalize_tool_name(str(event.get("tool", "")))
+    category = str(event.get("category") or _tool_category(tool_name))
+    if tool_name in _NOISE_TOOL_NAMES or category in _MEMORY_DRAFT_TOOL_CATEGORIES_TO_SKIP:
+        return None
+
+    tool_event: dict[str, Any] = {}
+    tool = event.get("tool")
+    if isinstance(tool, str) and tool:
+        tool_event["tool"] = tool
+    if isinstance(category, str) and category:
+        tool_event["category"] = category
+    arguments = _memory_safe_value(event.get("arguments"))
+    if arguments not in (None, "", {}, []):
+        tool_event["arguments"] = arguments
+    output = _memory_safe_value(event.get("output"))
+    if isinstance(output, str):
+        output = _bounded_text(output, _MEMORY_DRAFT_TOOL_OUTPUT_CHARS)
+    if output not in (None, "", {}, []):
+        tool_event["output"] = output
+    return tool_event or None
+
+
+def _memory_safe_value(value: Any) -> Any:
+    return _remove_image_placeholders(sanitize_images(serialize_for_json(value)))
 
 
 def _matched_tool_items(
